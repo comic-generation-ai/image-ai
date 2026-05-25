@@ -1,0 +1,1 @@
+from .image_processing import add_caption_to_comic

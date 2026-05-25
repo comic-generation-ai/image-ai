@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package image_generation;
+
+service ImageGenerationService {
+  // Yêu cầu sinh ảnh bất đồng bộ, trả về ngay lập tức Task ID
+  rpc GenerateImageAsync (GenerateImageRequest) returns (GenerateImageResponse);
+  
+  // Kiểm tra trạng thái của một Task sinh ảnh
+  rpc GetTaskStatus (TaskStatusRequest) returns (TaskStatusResponse);
+
+  // Hủy một Task sinh ảnh đang chờ hoặc đang chạy
+  rpc CancelTask (CancelRequest) returns (CancelResponse);
+
+  // Kiểm tra sức khỏe dịch vụ gRPC
+  rpc CheckHealth (CheckHealthRequest) returns (CheckHealthResponse);
+}
+
+
+message GenerateImageRequest {
+  string prompt = 1;              // Prompt tiếng Anh đã được dịch và thêm style
+  int32 width = 2;                // Chiều rộng ảnh (mặc định cho SDXL là 1024)
+  int32 height = 3;               // Chiều cao ảnh (mặc định cho SDXL là 1024)
+  int32 seed = 4;                 // Seed để kiểm soát tính ngẫu nhiên (-1 cho ngẫu nhiên)
+  int32 num_inference_steps = 5;  // Số bước khử nhiễu (4-8 cho SDXL Turbo)
+  string caption_text = 6;        // Văn bản lời thoại tiếng Việt chèn vào khung truyện
+}
+
+message GenerateImageResponse {
+  string task_id = 1;             // ID duy nhất của Task sinh ảnh được đẩy vào queue
+  string status = 2;              // Trạng thái ban đầu (ví dụ: PENDING)
+}
+
+message TaskStatusRequest {
+  string task_id = 1;
+}
+
+message TaskStatusResponse {
+  string task_id = 1;
+  string status = 2;              // PENDING, PROCESSING, SUCCESS, FAILED
+  string minio_url = 3;           // Presigned URL trỏ tới ảnh trên MinIO (nếu SUCCESS)
+  string error_message = 4;       // Thông báo lỗi nếu thất bại
+}
+
+message CancelRequest{
+  string task_id = 1;
+}
+message CancelResponse{
+  string task_id = 1;
+  string status = 2;
+}
+
+message CheckHealthRequest{}
+
+message CheckHealthResponse{
+  bool is_alive = 1;
+  map<string, string> versions = 2;
+}

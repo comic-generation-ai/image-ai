@@ -1,0 +1,96 @@
+import sys
+import os
+import time
+import grpc
+import requests
+
+# Thêm thư mục gốc của dự án vào sys.path để tìm thấy package 'src'
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(project_root)
+
+try:
+    from src.service.generated import image_generation_pb2
+    from src.service.generated import image_generation_pb2_grpc
+except ImportError as e:
+    print(f"Lỗi: Không import được protobuf classes. Hãy chắc chắn bạn đã biên dịch proto bằng generate_proto.sh. Chi tiết: {e}")
+    sys.exit(1)
+
+def test_http_health():
+    print("\n=== 1. KIỂM TRA FASTAPI HEALTH SERVER ===")
+    try:
+        response = requests.get("http://localhost:8000/healthz", timeout=3)
+        if response.status_code == 200:
+            print("✓ FastAPI Health Check: OK!")
+            print(f"   Kết quả: {response.json()}")
+        else:
+            print(f"FastAPI Health Check: Lỗi (Status Code: {response.status_code})")
+    except Exception as e:
+        print(f"✗ FastAPI Health Check: Thất bại! Không kết nối được. Lỗi: {e}")
+
+def test_grpc_service():
+    print("\n=== 2. KIỂM TRA DỊCH VỤ GRPC ===")
+    channel = grpc.insecure_channel("localhost:50051")
+    stub = image_generation_pb2_grpc.ImageGenerationServiceStub(channel)
+    
+    # 2.1 Check Health gRPC
+    try:
+        print("Đang gửi yêu cầu gRPC CheckHealth...")
+        health_resp = stub.CheckHealth(image_generation_pb2.CheckHealthRequest())
+        print(f"✓ gRPC CheckHealth: OK!")
+        print(f"   is_alive: {health_resp.is_alive}")
+        print(f"   versions: {dict(health_resp.versions)}")
+    except grpc.RpcError as e:
+        print(f"✗ gRPC CheckHealth: Thất bại! (Code: {e.code()}, Details: {e.details()})")
+        print("Hãy chắc chắn rằng server.py đang chạy.")
+        return
+        
+    # 2.2 Generate Image
+    try:
+        prompt = "A cute cartoon baby dragon breathing tiny puffs of fire, Pixar style, 3d render"
+        caption = "Rồng con tập thổi lửa!"
+        print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
+        print(f"   Prompt: '{prompt}'")
+        print(f"   Caption: '{caption}'")
+        
+        req = image_generation_pb2.GenerateImageRequest(
+            prompt=prompt,
+            width=512,          # Dùng kích thước nhỏ để sinh ảnh nhanh khi test
+            height=512,
+            seed=42,
+            num_inference_steps=4,
+            caption_text=caption
+        )
+        
+        resp = stub.GenerateImageAsync(req)
+        task_id = resp.task_id
+        print(f"✓ Đã gửi request thành công. Celery Task ID: {task_id}")
+        
+        # Poll status
+        print("\nĐang theo dõi trạng thái task sinh ảnh (polling từ Redis qua gRPC)...")
+        print("Hãy đảm bảo Celery Worker đang chạy để xử lý tác vụ này.")
+        for i in range(60): # Chờ tối đa 2 phút (mỗi vòng lặp 2 giây)
+            status_req = image_generation_pb2.TaskStatusRequest(task_id=task_id)
+            status_resp = stub.GetTaskStatus(status_req)
+            print(f"   [{i*2}s] Trạng thái: {status_resp.status}")
+            
+            if status_resp.status == "SUCCESS":
+                print(f"\n🎉 SINH ẢNH THÀNH CÔNG!")
+                print(f"🔗 Đường dẫn MinIO Presigned URL:\n{status_resp.minio_url}")
+                print("\n👉 Bạn hãy copy link trên và mở trong trình duyệt để xem kết quả nhé!")
+                break
+            elif status_resp.status == "FAILED":
+                print(f"\n✗ SINH ẢNH THẤT BẠI! Lỗi từ worker: {status_resp.error_message}")
+                break
+                
+            time.sleep(2)
+        else:
+            print("\n✗ Quá thời gian chờ (Timeout)!")
+            
+    except grpc.RpcError as e:
+        print(f"✗ Lỗi kết nối gRPC khi sinh ảnh: {e.code()} - {e.details()}")
+    finally:
+        channel.close()
+
+if __name__ == "__main__":
+    test_http_health()
+    test_grpc_service()

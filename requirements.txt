@@ -1,0 +1,30 @@
+# PyTorch and Core AI
+torch>=2.0.0
+torchvision
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate>=0.26.0
+
+# gRPC and APIs
+grpcio>=1.59.0
+grpcio-tools>=1.59.0
+protobuf>=4.25.0
+fastapi>=0.100.0
+uvicorn>=0.22.0
+pydantic-settings>=2.0.0
+
+# Storage & Caching
+minio>=7.2.0
+redis>=5.0.0
+celery>=5.3.0
+
+# Image Processing
+Pillow>=10.0.0
+
+# Monitoring
+prometheus-client>=0.19.0
+
+# Utilities & Dev
+python-dotenv>=1.0.0
+streamlit>=1.30.0
+pytest>=7.4.0

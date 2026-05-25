@@ -1,0 +1,67 @@
+
+services:
+  # redis làm message broker và cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # minio lưu trữ ảnh độc lập cho local dev
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # service chính chạy gRPC + REST API
+  # api-server:
+  #   build: 
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: api-server
+  #   ports:
+  #     - "${HTTP_PORT}:${HTTP_PORT}"
+  #     - "${GRPC_PORT}:${GRPC_PORT}"
+  #   environment:
+  #     - REDIS_URL=${REDIS_URL}
+  #     - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+  #     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+  #     - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+  #   volumes:
+  #     - ./proto:/app/proto
+  #     - ./src:/app/src
+  #   depends_on:
+  #     - redis
+  #     - minio
+
+  # worker xử lý sinh ảnh bằng GPU
+  # celery-worker:
+  #   build: .
+  #   command: celery -A worker.celery_app worker --loglevel=info --concurrency=1
+  #   environment:
+  #     - REDIS_URL=${REDIS_URL}
+  #     - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+  #     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+  #     - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   depends_on:
+  #     - redis
+  #     - minio
+
+volumes:
+  redis_data:
+  minio_data:
