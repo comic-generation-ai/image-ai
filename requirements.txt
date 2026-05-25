@@ -33,5 +33,3 @@ uuid6>=2024.1.12
 # Data validation
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
-
-

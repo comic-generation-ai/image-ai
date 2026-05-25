@@ -91,6 +91,43 @@ def test_grpc_service():
     finally:
         channel.close()
 
+def test_cancel_task():
+    print("\n=== 4. KIỂM TRA HỦY TASK (CANCELTASK) ===")
+    channel = grpc.insecure_channel("localhost:50051")
+    stub = image_generation_pb2_grpc.ImageGenerationServiceStub(channel)
+    try:
+        # Gửi request sinh ảnh
+        print("Đang gửi yêu cầu sinh ảnh để hủy...")
+        req = image_generation_pb2.GenerateImageRequest(
+            prompt="A fast running red sportscar",
+            width=512,
+            height=512,
+            seed=12,
+            num_inference_steps=4,
+            caption_text="Chạy trốn!"
+        )
+        resp = stub.GenerateImageAsync(req)
+        task_id = resp.task_id
+        print(f"✓ Đã gửi request thành công. Celery Task ID: {task_id}")
+        
+        # Hủy task lập tức
+        print(f"Đang gửi lệnh hủy Task ID: {task_id}...")
+        cancel_req = image_generation_pb2.CancelRequest(task_id=task_id)
+        cancel_resp = stub.CancelTask(cancel_req)
+        print(f"✓ gRPC CancelTask Response: Task ID: {cancel_resp.task_id}, Status: {cancel_resp.status}")
+        
+        # Kiểm tra lại trạng thái xem task có bị hủy không
+        time.sleep(1)
+        status_req = image_generation_pb2.TaskStatusRequest(task_id=task_id)
+        status_resp = stub.GetTaskStatus(status_req)
+        print(f"   Trạng thái sau khi hủy: {status_resp.status}")
+        
+    except grpc.RpcError as e:
+        print(f"✗ Lỗi gRPC khi hủy task: {e.code()} - {e.details()}")
+    finally:
+        channel.close()
+
 if __name__ == "__main__":
     test_http_health()
     test_grpc_service()
+    test_cancel_task()

@@ -1,91 +1,194 @@
-import os
 import io
-from minio import Minio
+import logging
 from datetime import timedelta
+from typing import Optional, Union, Dict, Any
 from PIL import Image
-from logger.config import get_logger
+from minio import Minio
+from minio.error import S3Error 
 
-logger = get_logger(__name__)
+from config.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 class MinioStorageClient:
+    """MinIO client for file storage operations operating entirely in RAM."""
+    
     def __init__(self):
-        # Đọc cấu hình từ Env
-        self.endpoint = os.getenv("MINIO_ENDPOINT", "localhost:9000")
-        self.access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-        self.secret_key = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-        self.secure = os.getenv("MINIO_SECURE", "False").lower() == "true"
-        self.bucket_name = os.getenv("MINIO_BUCKET_NAME", "comic-images")
-        
-        self.client = None
+        self.settings = get_settings()
+        self._client: Optional[Minio] = None
 
-    def initialize_client(self):
-        """Khởi tạo MinIO Connection và tự động tạo Bucket nếu chưa tồn tại."""
-        if self.client is not None:
-            return
-
-        logger.info(f"Đang thiết lập kết nối tới MinIO tại: {self.endpoint}...")
-        try:
-            self.client = Minio(
-                endpoint=self.endpoint,
-                access_key=self.access_key,
-                secret_key=self.secret_key,
-                secure=self.secure
+    @property
+    def client(self) -> Minio:
+        """Get or create MinIO client."""
+        if self._client is None:
+            self._client = Minio(
+                endpoint=self.settings.MINIO_ENDPOINT,
+                access_key=self.settings.MINIO_ROOT_USER,
+                secret_key=self.settings.MINIO_ROOT_PASSWORD,
+                secure=self.settings.MINIO_SECURE,
             )
-
-            # Tự động tạo Bucket chứa ảnh của truyện
-            if not self.client.bucket_exists(self.bucket_name):
-                logger.info(f"Bucket '{self.bucket_name}' chưa tồn tại. Đang tiến hành khởi tạo mới...")
-                self.client.make_bucket(self.bucket_name)
-                logger.info(f"Đã khởi tạo Bucket '{self.bucket_name}' thành công!")
-            
+        return self._client
+    
+    def health_check(self) -> dict:
+        """Check status connection to MinIO."""
+        try:
+            buckets = self.client.list_buckets()
+            return {
+                "healthy": True,
+                "buckets_count": len(buckets),
+                "message": "MinIO connection successful",
+            }
         except Exception as e:
-            logger.error(f"Khởi tạo MinIO Client thất bại: {str(e)}")
-            raise e
-
-    def upload_image(self, image: Image.Image, filename: str) -> str:
-        """
-        Nghiệp vụ tải ảnh nhị phân trực tiếp từ RAM (io.BytesIO) lên MinIO, 
-        giúp tăng tốc hệ thống và tránh đọc ghi ổ đĩa vật lý của Server.
-        """
-        self.initialize_client()
-        logger.info(f"Đang chuẩn bị tải ảnh lên MinIO Bucket '{self.bucket_name}' với tên: {filename}...")
-
+            logger.error(f"MinIO health check failed: {e}")
+            return {"healthy": False, "error": str(e)}
+        
+    def bucket_exists(self, bucket_name: str) -> bool:
+        """Check if bucket exists."""
         try:
-            # Chuyển đổi định dạng PIL Image sang byte stream nhị phân
+            return self.client.bucket_exists(bucket_name)
+        except Exception as e:
+            logger.error(f"Failed to check bucket {bucket_name}: {e}")
+            return False
+        
+    def object_exists(self, bucket_name: str, object_path: str) -> bool:
+        """Check if object exists in bucket."""
+        try:
+            self.client.stat_object(bucket_name, object_path)
+            return True
+        except S3Error:
+            return False
+        except Exception as e:
+            logger.error(f"Error checking object existence: {e}")
+            return False
+        
+    def get_object_info(self, bucket_name: str, object_path: str) -> Optional[dict]:
+        """Get object metadata."""
+        try:
+            stat = self.client.stat_object(bucket_name, object_path)
+            return {
+                "size": stat.size,
+                "content_type": stat.content_type,
+                "last_modified": stat.last_modified,
+                "etag": stat.etag,
+                "metadata": stat.metadata,
+            }
+        except S3Error as e:
+            logger.error(f"Failed to get object info for {object_path}: {e}")
+            return None
+    
+    def upload_image(
+        self,
+        image: Image.Image,
+        filename: Optional[str] = None,
+        bucket_name: Optional[str] = None,
+        object_path: Optional[str] = None,
+        content_type: str = "image/png",
+    ) -> Optional[str]:
+        """
+        Upload một đối tượng PIL Image từ RAM thẳng lên MinIO (Không ghi xuống ổ cứng)
+        và trả về đường dẫn Presigned URL có thời hạn.
+
+        Args:
+            image: Đối tượng PIL.Image cần upload
+            filename: Tên file (tương thích ngược)
+            bucket_name: Tên bucket trong MinIO (mặc định lấy từ settings nếu không truyền)
+            object_path: Đường dẫn lưu file trong bucket (mặc định bằng filename nếu không truyền)
+            content_type: MIME type của ảnh (mặc định image/png)
+
+        Returns:
+            str: Đường dẫn Presigned URL nếu thành công, None nếu thất bại.
+        """
+        try:
+            # 1. Resolve parameters dynamically for backward compatibility
+            final_bucket = bucket_name or self.settings.MINIO_BUCKET_NAME
+            final_path = object_path or filename
+            
+            if not final_path:
+                raise ValueError("Phải cung cấp 'filename' hoặc 'object_path' để upload ảnh.")
+
+            # Ensure bucket exists
+            if not self.bucket_exists(final_bucket):
+                logger.info(f"Creating bucket: {final_bucket}")
+                self.client.make_bucket(final_bucket)
+                
+            # 2. Convert PIL Image to Byte Stream directly in RAM
             img_byte_arr = io.BytesIO()
-            image.save(img_byte_arr, format='JPEG', quality=95)
-            img_byte_arr.seek(0)
-            
-            # Gửi nhị phân lên MinIO
+            # Determine storage format based on content_type
+            img_format = "JPEG" if content_type in ["image/jpeg", "image/jpg"] else "PNG"
+            image.save(img_byte_arr, format=img_format)
+            img_byte_arr.seek(0)  # Move stream pointer to start
+            file_length = img_byte_arr.getbuffer().nbytes
+
+            # 3. Use put_object to push byte stream from RAM to MinIO Server
             self.client.put_object(
-                bucket_name=self.bucket_name,
-                object_name=filename,
+                bucket_name=final_bucket,
+                object_name=final_path,
                 data=img_byte_arr,
-                length=len(img_byte_arr.getvalue()),
-                content_type='image/jpeg'
+                length=file_length,
+                content_type=content_type,
             )
-            logger.info(f"Đã upload thành công ảnh {filename} lên MinIO!")
+            logger.info(f"Successfully uploaded image to {final_bucket}/{final_path} (Size: {file_length} bytes)")
             
-            # Sinh link Presigned URL để client lấy hiển thị trực tiếp (hiệu lực trong 7 ngày)
-            presigned_url = self.get_presigned_url(filename)
+            # 4. Generate Presigned URL with 7-day validity to send back to Orchestrator
+            presigned_url = self.get_presigned_url(final_bucket, final_path)
             return presigned_url
             
+        except S3Error as e:
+            logger.error(f"S3 Error uploading file: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Tải ảnh lên MinIO thất bại: {str(e)}")
-            raise e
+            logger.error(f"Unexpected error uploading file: {e}")
+            return None
+    
+    def list_objects(
+        self, bucket_name: str, prefix: str = "", recursive: bool = True
+    ) -> list[dict]:
+        """List objects in bucket with optional prefix filter."""
+        try:
+            objects = self.client.list_objects(
+                bucket_name, prefix=prefix, recursive=recursive
+            )
+            return [
+                {
+                    "name": obj.object_name,
+                    "size": obj.size,
+                    "last_modified": obj.last_modified,
+                    "is_dir": obj.is_dir,
+                }
+                for obj in objects
+            ]
+        except S3Error as e:
+            logger.error(f"Failed to list objects in {bucket_name}: {e}")
+            return []
 
-    def get_presigned_url(self, filename: str, expires_days: int = 7) -> str:
-        """Sinh đường dẫn an toàn (Presigned URL) có giới hạn thời gian truy cập."""
-        self.initialize_client()
+    def get_presigned_url(self, bucket_name: str, object_path: str, expires_days: int = 7) -> str:
+        """Generate Presigned URL for Client to access image directly."""
         try:
             url = self.client.presigned_get_object(
-                bucket_name=self.bucket_name,
-                object_name=filename,
+                bucket_name=bucket_name,
+                object_name=object_path,
                 expires=timedelta(days=expires_days)
             )
             return url
         except Exception as e:
-            logger.error(f"Lấy link Presigned URL thất bại cho file {filename}: {str(e)}")
+            logger.error(f"Lấy link Presigned URL thất bại cho file {object_path}: {str(e)}")
             raise e
 
-minio_storage_client = MinioStorageClient()
+    def close(self):
+        """Close the MinIO client and release resources."""
+        if self._client:
+            self._client = None
+            logger.info("MinIO client connection reference cleared")
+
+
+# Singleton instance
+_minio_storage_client: Optional[MinioStorageClient] = None
+
+def get_minio_storage_client() -> MinioStorageClient:
+    """Get or create MinIO storage client singleton."""
+    global _minio_storage_client
+    if _minio_storage_client is None:
+        _minio_storage_client = MinioStorageClient()
+    return _minio_storage_client
+
+minio_storage_client = get_minio_storage_client()

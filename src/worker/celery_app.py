@@ -1,25 +1,23 @@
-import os
 from celery import Celery
+from config.settings import get_settings
 
-# Đọc cấu hình hàng đợi từ Env
-broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-backend_url = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+settings = get_settings()
 
 # Khởi tạo Celery Application cho Worker chạy GPU sinh ảnh
 celery_app = Celery(
     "image_ai_worker",
-    broker=broker_url,
-    backend=backend_url,
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
     include=["worker.tasks"] # Khai báo danh sách các file chứa task
 )
 
 # Cấu hình Celery tối ưu hóa
 celery_app.conf.update(
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-    timezone="Asia/Ho_Chi_Minh",
-    enable_utc=True,
+    task_serializer=settings.CELERY_TASK_SERIALIZER,
+    result_serializer=settings.CELERY_RESULT_SERIALIZER,
+    accept_content=settings.CELERY_ACCEPT_CONTENT,
+    timezone=settings.CELERY_TIMEZONE,
+    enable_utc=settings.CELERY_ENABLE_UTC,
     
     # Rất quan trọng cho GPU Worker: Chỉ lấy 1 task tại một thời điểm
     # Tránh nạp đè nhiều tác vụ sinh ảnh làm sập GPU

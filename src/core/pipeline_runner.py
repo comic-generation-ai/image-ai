@@ -1,14 +1,15 @@
-import os
 import torch
 from diffusers import StableDiffusionXLPipeline
+from config.settings import get_settings
 from logger.config import get_logger
 
 logger = get_logger(__name__)
 
 class PipelineRunner:
     def __init__(self):
-        self.model_id = os.getenv("MODEL_ID", "Lykon/dreamshaper-xl-v2-turbo")
-        self.low_vram_mode = os.getenv("LOW_VRAM_MODE", "False").lower() == "true"
+        self.settings = get_settings()
+        self.model_id = self.settings.MODEL_ID
+        self.low_vram_mode = self.settings.LOW_VRAM_MODE
         self.pipeline = None
         
         # Tự động nhận diện thiết bị phần cứng để tối ưu hóa hiệu năng

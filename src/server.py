@@ -1,5 +1,5 @@
-import os
 import time
+import os
 import asyncio
 from concurrent import futures
 import grpc
@@ -7,8 +7,11 @@ from fastapi import FastAPI
 import uvicorn
 import threading
 
+from config.settings import get_settings
 from logger.config import get_logger
 from service.image_service import ImageGenerationService
+from storage import minio_storage_client
+from cache.redis_cache import redis_cache_manager
 
 # Import gRPC generated classes
 try:
@@ -26,7 +29,31 @@ app = FastAPI(title="Image AI Health Service", version="1.0.0")
 @app.get("/healthz")
 def health_check():
     """Endpoint giám sát trạng thái sức khỏe (Health Check) hệ thống."""
-    return {"status": "healthy", "service": "image-ai", "timestamp": time.time()}
+    # Check MinIO status
+    minio_status = minio_storage_client.health_check()
+    
+    # Check Redis status
+    redis_status = {"healthy": False}
+    try:
+        redis_cache_manager.initialize_client()
+        if redis_cache_manager.client and redis_cache_manager.client.ping():
+            redis_status = {"healthy": True, "message": "Redis connection successful"}
+        else:
+            redis_status = {"healthy": False, "error": "Redis ping failed"}
+    except Exception as e:
+        redis_status = {"healthy": False, "error": str(e)}
+
+    overall_healthy = minio_status.get("healthy", False) and redis_status.get("healthy", False)
+    
+    return {
+        "status": "healthy" if overall_healthy else "unhealthy",
+        "service": "image-ai",
+        "timestamp": time.time(),
+        "dependencies": {
+            "minio": minio_status,
+            "redis": redis_status
+        }
+    }
 
 @app.get("/metrics")
 def get_metrics():
@@ -67,9 +94,10 @@ def start_grpc_server(host: str, port: int):
 
 # ----------------- MAIN INITIALIZATION -----------------
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    grpc_port = int(os.getenv("GRPC_PORT", "50051"))
-    http_port = int(os.getenv("HTTP_PORT", "8000"))
+    settings = get_settings()
+    host = settings.HOST
+    grpc_port = settings.GRPC_PORT
+    http_port = settings.HTTP_PORT
 
     # Chạy FastAPI Health Server trên một luồng nền phụ (Daemon Thread)
     fastapi_thread = threading.Thread(

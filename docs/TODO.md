@@ -16,10 +16,10 @@
     - [x] Viết đặc tả gRPC Protobuf tại `proto/image_generation.proto`
     - [x] Viết script tự động biên dịch `scripts/generate_proto.sh`
     - [x] Biên dịch gRPC Python code thành công
-- [ ] **1.3 Cấu hình Tập trung (Centralized Config)**
-    - [ ] Định nghĩa `src/config/settings.py` sử dụng `Pydantic Settings`
-    - [ ] Chuyển đổi toàn bộ `os.getenv` trong mã nguồn sang sử dụng `settings` mới
-    - [ ] Tạo file `.env.example` làm mẫu cấu hình
+- [x] **1.3 Cấu hình Tập trung (Centralized Config)**
+    - [x] Định nghĩa `src/config/settings.py` sử dụng `Pydantic Settings`
+    - [x] Chuyển đổi toàn bộ `os.getenv` trong mã nguồn sang sử dụng `settings` mới
+    - [x] Tạo file `.env.example` làm mẫu cấu hình
 
 ---
 

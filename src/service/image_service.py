@@ -85,6 +85,9 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             elif status == "STARTED":
                 response.status = "PROCESSING"
                 
+            elif status == "REVOKED":
+                response.status = "CANCELLED"
+                
             else:
                 response.status = status
                 
@@ -95,6 +98,30 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return image_generation_pb2.TaskStatusResponse()
+
+    def CancelTask(self, request, context):
+        """
+        Hủy một Task sinh ảnh đang chờ hoặc đang chạy
+        """
+        task_id = request.task_id
+        logger.info(f"Yêu cầu hủy Task ID: {task_id}")
+        try:
+            # Thu hồi task (revoke) trong Celery
+            # terminate=True để ngắt tiến trình nếu task đang chạy
+            celery_app.control.revoke(task_id, terminate=True)
+            logger.info(f"Đã gửi lệnh hủy Task ID: {task_id} thành công")
+            return image_generation_pb2.CancelResponse(
+                task_id=task_id,
+                status="CANCELLED"
+            )
+        except Exception as e:
+            logger.error(f"Lỗi khi hủy Task ID {task_id}: {str(e)}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return image_generation_pb2.CancelResponse(
+                task_id=task_id,
+                status="FAILED"
+            )
 
     def CheckHealth(self, request, context):
         """

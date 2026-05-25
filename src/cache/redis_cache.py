@@ -1,13 +1,14 @@
-import os
 import hashlib
 import redis
+from config.settings import get_settings
 from logger.config import get_logger
 
 logger = get_logger(__name__)
 
 class RedisCacheManager:
     def __init__(self):
-        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.settings = get_settings()
+        self.redis_url = self.settings.REDIS_URL
         self.client = None
 
     def initialize_client(self):
