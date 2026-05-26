@@ -1,9 +1,25 @@
 import torch
-from diffusers import StableDiffusionXLPipeline
+from diffusers import StableDiffusionXLPipeline, AutoPipelineForText2Image
 from config.settings import get_settings
 from logger.config import get_logger
+from dataclasses import dataclass
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class ImageRequest:
+    prompt: str
+    width: int = 1024
+    height: int = 1024
+    seed: int = -1
+    steps: int = 8
+
+
+@dataclass
+class ImageResponse:
+    image: torch.Tensor
+    
 
 class PipelineRunner:
     def __init__(self):
@@ -12,28 +28,28 @@ class PipelineRunner:
         self.low_vram_mode = self.settings.LOW_VRAM_MODE
         self.pipeline = None
         
-        # Tự động nhận diện thiết bị phần cứng để tối ưu hóa hiệu năng
+        # Auto detect hardware device
         if torch.cuda.is_available():
             self.device = "cuda"
             self.dtype = torch.float16
-            logger.info("Phát hiện GPU NVIDIA CUDA. Chạy ở chế độ High-Performance.")
+            logger.info("Detected NVIDIA CUDA GPU. Running in High-Performance mode.")
         elif torch.backends.mps.is_available():
             self.device = "mps"
-            self.dtype = torch.float16  # Apple Silicon hỗ trợ tốt float16 cho đa số mô hình
-            logger.info("Phát hiện Apple Silicon GPU (MPS). Chạy tối ưu hóa nội bộ trên Mac.")
+            self.dtype = torch.float16  # Apple Silicon support float16
+            logger.info("Detected Apple Silicon GPU (MPS). Running optimized on Mac.")
         else:
             self.device = "cpu"
             self.dtype = torch.float32
-            logger.warning("Không tìm thấy GPU. Chạy trên CPU (Hiệu năng sẽ cực kỳ chậm!).")
+            logger.warning("No GPU detected. Running on CPU (Performance will be extremely slow!).")
 
     def initialize_pipeline(self):
-        """Khởi tạo Stable Diffusion XL Pipeline với các cấu hình tối ưu bộ nhớ."""
+        """Initialize Stable Diffusion XL Pipeline with memory optimization configurations."""
         if self.pipeline is not None:
             return
-
-        logger.info(f"Đang khởi tạo pipeline SDXL từ weights: {self.model_id}...")
+        
+        logger.info(f"Initializing pipeline SDXL from weights: {self.model_id}...")
         try:
-            # Khởi tạo mô hình ở định dạng float16 hoặc float32 tùy thiết bị
+            # Initialize model in float16 or float32 depending on the device
             self.pipeline = StableDiffusionXLPipeline.from_pretrained(
                 self.model_id,
                 torch_dtype=self.dtype,

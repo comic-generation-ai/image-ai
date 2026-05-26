@@ -2,8 +2,47 @@ import gc
 import torch
 import asyncio
 from logger.config import get_logger
+from dataclasses import dataclass
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class VramInfo:
+    allocated_mb: float
+    reserved_mb: float
+    device_name: str
+    status: str = "GPU is running"
+    is_gpu_available: bool = True
+    free_gpu_available: float = 0
+    
+@dataclass
+class VramLock:
+    allocated_mb: float
+    free_gpu_available: float = 0
+    
+@dataclass
+class VramStatus:
+    total_gpu_available: float
+    free_gpu_available: float
+    allocated_mb: float
+    reserved_mb: float
+    device_name: str
+    status: str
+    is_gpu_available: bool
+    allocated_locks: list[VramLock] = []
+
+@dataclass
+class VramManagerConfig:
+    max_gpu_locks: int = 1
+    max_gpu_memory_usage: float = 0.9
+    max_gpu_memory_usage_reserved: float = 0.9
+    max_gpu_memory_usage_allocated: float = 0.9
+    max_gpu_memory_usage_free: float = 0.9
+    max_gpu_memory_usage_total: float = 0.9
+    max_gpu_memory_usage_used: float = 0.9
+
+
 
 class VramManager:
     def __init__(self):
