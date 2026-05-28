@@ -1,15 +1,26 @@
 import uuid
 import time
 from worker.celery_app import celery_app
-from core.pipeline_runner import pipeline_runner
+from core.pipeline_runner import pipeline_runner, ImageRequest
 from core.vram_manager import vram_manager
 from core.safety_checker import safety_checker
 from utils.image_processing import add_caption_to_comic
 from storage.minio_client import minio_storage_client
 from cache.redis_cache import redis_cache_manager
+from config.settings import get_settings
+from metrics import (
+    image_requests_total,
+    cache_hit_total,
+    cache_miss_total,
+    task_duration_seconds,
+    minio_upload_errors_total,
+    safety_blocks_total,
+    active_gpu_tasks,
+)
 from logger.config import get_logger
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 @celery_app.task(bind=True, name="worker.tasks.generate_image_task")
 def generate_image_task(self, prompt: str, width: int, height: int, seed: int, steps: int, caption_text: str):
@@ -19,7 +30,8 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
     """
     task_id = self.request.id
     logger.info(f"--- BẮT ĐẦU XỬ LÝ TASK SINH ẢNH (ID: {task_id}) ---")
-    
+    self.update_state(state="STARTED", meta={"stage": "queued_or_running"})
+
     # Lấy thời gian bắt đầu đo hiệu năng
     start_time = time.time()
 
@@ -29,40 +41,76 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         seed=seed,
         caption_text=caption_text,
         width=width,
-        height=height
+        height=height,
+        steps=steps,
+        model_id=pipeline_runner.model_id,
+        output_image_format=settings.OUTPUT_IMAGE_FORMAT.lower(),
+        jpeg_quality=settings.JPEG_QUALITY,
+        png_compress_level=settings.PNG_COMPRESS_LEVEL,
     )
     
     # Bước 2: Kiểm tra cache trong Redis
     cached_url = redis_cache_manager.get_cached_image_url(hash_key)
     if cached_url:
+        cache_hit_total.inc()
+        image_requests_total.labels(status="SUCCESS").inc()
+        duration = round(time.time() - start_time, 2)
+        task_duration_seconds.labels(cached="true", success="true").observe(duration)
         logger.info(f"Task {task_id} hoàn thành ngay lập tức nhờ Cache Hit!")
         return {
             "task_id": task_id,
             "status": "SUCCESS",
             "minio_url": cached_url,
             "cached": True,
-            "duration_seconds": round(time.time() - start_time, 2)
+            "duration_seconds": duration
         }
+    cache_miss_total.inc()
+
+    # Thundering herd protection: chỉ 1 worker render cho cùng 1 hash key
+    if not redis_cache_manager.acquire_generation_lock(hash_key):
+        for _ in range(20):
+            time.sleep(0.25)
+            cached_url = redis_cache_manager.get_cached_image_url(hash_key)
+            if cached_url:
+                cache_hit_total.inc()
+                image_requests_total.labels(status="SUCCESS").inc()
+                duration = round(time.time() - start_time, 2)
+                task_duration_seconds.labels(cached="true", success="true").observe(duration)
+                return {
+                    "task_id": task_id,
+                    "status": "SUCCESS",
+                    "minio_url": cached_url,
+                    "cached": True,
+                    "duration_seconds": duration
+                }
 
     try:
+        active_gpu_tasks.inc()
         # Bước 3: Sinh ảnh thô bằng GPU PyTorch
         # Note: Do Celery chạy đồng bộ bên trong Worker process, 
         # concurrrency=1 đảm bảo tuần tự hóa không cần asyncio.Lock vật lý.
         logger.info(f"Thông tin VRAM GPU trước khi chạy: {vram_manager.get_gpu_memory_info()}")
-        
-        raw_image = pipeline_runner.generate(
-            prompt=prompt,
-            width=width,
-            height=height,
-            seed=seed,
-            steps=steps
+
+        response = pipeline_runner.generate(
+            ImageRequest(
+                prompt=prompt,
+                width=width,
+                height=height,
+                seed=seed,
+                steps=steps,
+            )
         )
+        raw_image = response.image
         
         logger.info(f"Thông tin VRAM GPU sau khi chạy: {vram_manager.get_gpu_memory_info()}")
 
         # Bước 4: Kiểm duyệt an toàn hình ảnh (NSFW Filter)
-        if not safety_checker.check_image(raw_image):
-            raise ValueError("Bức ảnh không vượt qua bài kiểm duyệt nội dung an toàn (NSFW)!")
+        safety_result = safety_checker.check_image(raw_image)
+        if not safety_result.is_safe:
+            safety_blocks_total.inc()
+            raise ValueError(
+                f"Bức ảnh bị chặn bởi Safety Checker (nsfw_score={safety_result.nsfw_score:.4f})"
+            )
 
         # Bước 5: Hậu kỳ Pillow chèn khung truyện và lời thoại tiếng Việt
         processed_image = add_caption_to_comic(
@@ -71,11 +119,23 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         )
 
         # Bước 6: Tải ảnh lên MinIO Object Storage
-        filename = f"comic_{uuid.uuid4().hex}.jpg"
+        image_format = settings.OUTPUT_IMAGE_FORMAT.lower()
+        if image_format not in {"jpeg", "jpg", "png"}:
+            raise ValueError("OUTPUT_IMAGE_FORMAT phải là 'jpeg' hoặc 'png'")
+
+        extension = "jpg" if image_format in {"jpeg", "jpg"} else "png"
+        content_type = "image/jpeg" if extension == "jpg" else "image/png"
+        filename = f"comic_{uuid.uuid4().hex}.{extension}"
         presigned_url = minio_storage_client.upload_image(
             image=processed_image,
-            filename=filename
+            filename=filename,
+            content_type=content_type,
+            jpeg_quality=settings.JPEG_QUALITY,
+            png_compress_level=settings.PNG_COMPRESS_LEVEL,
         )
+        if not presigned_url:
+            minio_upload_errors_total.inc()
+            raise ValueError("Upload ảnh lên MinIO thất bại")
 
         # Bước 7: Lưu trữ vào Redis Cache để tái sử dụng
         redis_cache_manager.set_cached_image_url(hash_key, presigned_url)
@@ -84,6 +144,8 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         vram_manager.clear_cache()
 
         duration = round(time.time() - start_time, 2)
+        image_requests_total.labels(status="SUCCESS").inc()
+        task_duration_seconds.labels(cached="false", success="true").observe(duration)
         logger.info(f"--- HOÀN THÀNH TASK SINH ẢNH {task_id} TRONG {duration} GIÂY ---")
 
         return {
@@ -91,6 +153,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
             "status": "SUCCESS",
             "minio_url": presigned_url,
             "cached": False,
+            "seed": int(response.seed),
             "duration_seconds": duration
         }
 
@@ -98,9 +161,16 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         logger.error(f"Thực hiện Task {task_id} thất bại: {str(e)}")
         # Đảm bảo dọn dẹp GPU kể cả khi lỗi
         vram_manager.clear_cache()
+        image_requests_total.labels(status="FAILED").inc()
+        task_duration_seconds.labels(cached="false", success="false").observe(
+            round(time.time() - start_time, 2)
+        )
         return {
             "task_id": task_id,
             "status": "FAILED",
             "error_message": str(e),
             "duration_seconds": round(time.time() - start_time, 2)
         }
+    finally:
+        active_gpu_tasks.dec()
+        redis_cache_manager.release_generation_lock(hash_key)

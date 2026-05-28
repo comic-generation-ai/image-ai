@@ -46,8 +46,8 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "A cute cartoon baby dragon breathing tiny puffs of fire, Pixar style, 3d render"
-        caption = "Rồng con tập thổi lửa!"
+        prompt = "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k"
+        caption = "Astronaut in a jungle"
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")
@@ -68,17 +68,20 @@ def test_grpc_service():
         # Poll status
         print("\nĐang theo dõi trạng thái task sinh ảnh (polling từ Redis qua gRPC)...")
         print("Hãy đảm bảo Celery Worker đang chạy để xử lý tác vụ này.")
-        for i in range(60): # Chờ tối đa 2 phút (mỗi vòng lặp 2 giây)
+        for i in range(180):  
             status_req = image_generation_pb2.TaskStatusRequest(task_id=task_id)
             status_resp = stub.GetTaskStatus(status_req)
-            print(f"   [{i*2}s] Trạng thái: {status_resp.status}")
+            status_name = image_generation_pb2.ImageGenerationStatus.Name(status_resp.status)
+            print(f"   [{i*2}s] Trạng thái: {status_name}")
             
-            if status_resp.status == "SUCCESS":
-                print(f"\n🎉 SINH ẢNH THÀNH CÔNG!")
-                print(f"🔗 Đường dẫn MinIO Presigned URL:\n{status_resp.minio_url}")
-                print("\n👉 Bạn hãy copy link trên và mở trong trình duyệt để xem kết quả nhé!")
+            if status_resp.status == image_generation_pb2.PROCESSING:
+                continue
+            if status_resp.status == image_generation_pb2.SUCCESS:
+                print(f"\nSINH ẢNH THÀNH CÔNG!")
+                print(f"Đường dẫn MinIO Presigned URL:\n{status_resp.minio_url}")
+                print("\nBạn hãy copy link trên và mở trong trình duyệt để xem kết quả nhé!")
                 break
-            elif status_resp.status == "FAILED":
+            elif status_resp.status == image_generation_pb2.FAILED:
                 print(f"\n✗ SINH ẢNH THẤT BẠI! Lỗi từ worker: {status_resp.error_message}")
                 break
                 
@@ -114,13 +117,15 @@ def test_cancel_task():
         print(f"Đang gửi lệnh hủy Task ID: {task_id}...")
         cancel_req = image_generation_pb2.CancelRequest(task_id=task_id)
         cancel_resp = stub.CancelTask(cancel_req)
-        print(f"✓ gRPC CancelTask Response: Task ID: {cancel_resp.task_id}, Status: {cancel_resp.status}")
+        cancel_status_name = image_generation_pb2.ImageGenerationStatus.Name(cancel_resp.status)
+        print(f"✓ gRPC CancelTask Response: Task ID: {cancel_resp.task_id}, Status: {cancel_status_name}")
         
         # Kiểm tra lại trạng thái xem task có bị hủy không
         time.sleep(1)
         status_req = image_generation_pb2.TaskStatusRequest(task_id=task_id)
         status_resp = stub.GetTaskStatus(status_req)
-        print(f"   Trạng thái sau khi hủy: {status_resp.status}")
+        status_name = image_generation_pb2.ImageGenerationStatus.Name(status_resp.status)
+        print(f"   Trạng thái sau khi hủy: {status_name}")
         
     except grpc.RpcError as e:
         print(f"✗ Lỗi gRPC khi hủy task: {e.code()} - {e.details()}")

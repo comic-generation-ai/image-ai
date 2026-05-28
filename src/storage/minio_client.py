@@ -22,25 +22,31 @@ class MinioStorageClient:
         """Get or create MinIO client."""
         if self._client is None:
             self._client = Minio(
-                endpoint=self.settings.MINIO_ENDPOINT,
-                access_key=self.settings.MINIO_ROOT_USER,
-                secret_key=self.settings.MINIO_ROOT_PASSWORD,
-                secure=self.settings.MINIO_SECURE,
+                endpoint=f"{self.settings.MINIO_ENDPOINT}:{self.settings.MINIO_PORT}",
+                access_key=self.settings.MINIO_ACCESS_KEY,
+                secret_key=self.settings.MINIO_SECRET_KEY,
+                secure=self.settings.MINIO_USE_SSL,
             )
         return self._client
     
     def health_check(self) -> dict:
         """Check status connection to MinIO."""
+        bucket = self.settings.MINIO_BUCKET_NAME
+        endpoint = f"{self.settings.MINIO_ENDPOINT}:{self.settings.MINIO_PORT}"
         try:
             buckets = self.client.list_buckets()
+            if not self.bucket_exists(bucket):
+                self.client.make_bucket(bucket)
             return {
                 "healthy": True,
                 "buckets_count": len(buckets),
+                "bucket": bucket,
+                "endpoint": endpoint,
                 "message": "MinIO connection successful",
             }
         except Exception as e:
-            logger.error(f"MinIO health check failed: {e}")
-            return {"healthy": False, "error": str(e)}
+            logger.error(f"MinIO health check failed ({endpoint}, bucket={bucket}): {e}")
+            return {"healthy": False, "endpoint": endpoint, "bucket": bucket, "error": str(e)}
         
     def bucket_exists(self, bucket_name: str) -> bool:
         """Check if bucket exists."""
@@ -83,6 +89,8 @@ class MinioStorageClient:
         bucket_name: Optional[str] = None,
         object_path: Optional[str] = None,
         content_type: str = "image/png",
+        jpeg_quality: Optional[int] = None,
+        png_compress_level: Optional[int] = None,
     ) -> Optional[str]:
         """
         Upload một đối tượng PIL Image từ RAM thẳng lên MinIO (Không ghi xuống ổ cứng)
@@ -115,7 +123,27 @@ class MinioStorageClient:
             img_byte_arr = io.BytesIO()
             # Determine storage format based on content_type
             img_format = "JPEG" if content_type in ["image/jpeg", "image/jpg"] else "PNG"
-            image.save(img_byte_arr, format=img_format)
+            save_kwargs: Dict[str, Any] = {}
+            if img_format == "JPEG":
+                save_kwargs.update(
+                    {
+                        "quality": jpeg_quality or self.settings.JPEG_QUALITY,
+                        "subsampling": 0,
+                        "optimize": True,
+                    }
+                )
+            else:
+                save_kwargs.update(
+                    {
+                        "compress_level": (
+                            png_compress_level
+                            if png_compress_level is not None
+                            else self.settings.PNG_COMPRESS_LEVEL
+                        )
+                    }
+                )
+
+            image.save(img_byte_arr, format=img_format, **save_kwargs)
             img_byte_arr.seek(0)  # Move stream pointer to start
             file_length = img_byte_arr.getbuffer().nbytes
 
@@ -161,13 +189,13 @@ class MinioStorageClient:
             logger.error(f"Failed to list objects in {bucket_name}: {e}")
             return []
 
-    def get_presigned_url(self, bucket_name: str, object_path: str, expires_days: int = 7) -> str:
+    def get_presigned_url(self, bucket_name: str, object_path: str) -> str:
         """Generate Presigned URL for Client to access image directly."""
         try:
             url = self.client.presigned_get_object(
                 bucket_name=bucket_name,
                 object_name=object_path,
-                expires=timedelta(days=expires_days)
+                expires=timedelta(seconds=self.settings.PRESIGNED_TTL_SECONDS)
             )
             return url
         except Exception as e:

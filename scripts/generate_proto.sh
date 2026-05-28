@@ -16,6 +16,7 @@ mkdir -p "$OUTPUT_DIR"
 # 1. *.py (Mã hóa tin nhắn)
 # 2. *.pyi (Type hint stubs hỗ trợ nhắc lệnh / IDE Autocomplete)
 # 3. *_grpc.py (Các Stub và Servicer cho gRPC)
+echo "Đang biên dịch Protobuf..."
 python3 -m grpc_tools.protoc \
     -I"$PROTO_DIR" \
     --python_out="$OUTPUT_DIR" \

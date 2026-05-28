@@ -13,10 +13,10 @@ def get_logger(name: str):
             '[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-        
         # Ghi log ra màn hình Console
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
+        
         
     return logger

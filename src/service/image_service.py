@@ -2,6 +2,8 @@ import grpc
 from celery.result import AsyncResult
 from worker.celery_app import celery_app
 from worker.tasks import generate_image_task
+from core.vram_manager import vram_manager
+from config.settings import get_settings
 from logger.config import get_logger
 
 # Import các module được sinh ra tự động từ file .proto
@@ -17,6 +19,7 @@ except ImportError:
     import image_generation_pb2_grpc
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceServicer):
     
@@ -27,14 +30,35 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
         logger.info(f"Đã nhận yêu cầu sinh ảnh gRPC từ Orchestrator | Prompt: '{request.prompt[:30]}...'")
         
         try:
+            width = request.width if request.width > 0 else 1024
+            height = request.height if request.height > 0 else 1024
+            steps = request.num_inference_steps if request.num_inference_steps > 0 else 8
+
+            if width <= 0 or width > settings.MAX_WIDTH or width % 8 != 0:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"width phải trong khoảng 8..{settings.MAX_WIDTH} và chia hết cho 8")
+                return image_generation_pb2.GenerateImageResponse()
+            if height <= 0 or height > settings.MAX_HEIGHT or height % 8 != 0:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"height phải trong khoảng 8..{settings.MAX_HEIGHT} và chia hết cho 8")
+                return image_generation_pb2.GenerateImageResponse()
+            if steps < settings.MIN_STEPS or steps > settings.MAX_STEPS:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"num_inference_steps phải trong khoảng {settings.MIN_STEPS}..{settings.MAX_STEPS}")
+                return image_generation_pb2.GenerateImageResponse()
+            if len(request.caption_text or "") > settings.CAPTION_MAX_LENGTH:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"caption_text vượt quá {settings.CAPTION_MAX_LENGTH} ký tự")
+                return image_generation_pb2.GenerateImageResponse()
+
             # Đẩy công việc vào Celery Worker xử lý bất đồng bộ
             # Concurrency=1 trên Worker đảm bảo GPU xử lý tuần tự không bị sập
             async_result = generate_image_task.delay(
                 prompt=request.prompt,
-                width=request.width if request.width > 0 else 1024,
-                height=request.height if request.height > 0 else 1024,
+                width=width,
+                height=height,
                 seed=request.seed,
-                steps=request.num_inference_steps if request.num_inference_steps > 0 else 8,
+                steps=steps,
                 caption_text=request.caption_text
             )
             
@@ -43,7 +67,7 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             # Trả kết quả gRPC ngay lập tức
             return image_generation_pb2.GenerateImageResponse(
                 task_id=async_result.id,
-                status="PENDING"
+                status=image_generation_pb2.PENDING
             )
             
         except Exception as e:
@@ -69,27 +93,29 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             if status == "SUCCESS":
                 result = async_result.result  # Kết quả trả về của task
                 if result.get("status") == "SUCCESS":
-                    response.status = "SUCCESS"
+                    response.status = image_generation_pb2.SUCCESS
                     response.minio_url = result.get("minio_url", "")
                 else:
-                    response.status = "FAILED"
+                    response.status = image_generation_pb2.FAILED
                     response.error_message = result.get("error_message", "Sinh ảnh lỗi trên GPU")
                     
             elif status == "FAILURE":
-                response.status = "FAILED"
+                response.status = image_generation_pb2.FAILED
                 response.error_message = str(async_result.result)
                 
             elif status == "PENDING" or status == "RECEIVED" or status == "RETRY":
-                response.status = "PENDING"
+                response.status = image_generation_pb2.PENDING
                 
             elif status == "STARTED":
-                response.status = "PROCESSING"
+                response.status = image_generation_pb2.PROCESSING
                 
             elif status == "REVOKED":
-                response.status = "CANCELLED"
+                response.status = image_generation_pb2.FAILED
+                response.error_message = "Task đã bị hủy"
                 
             else:
-                response.status = status
+                response.status = image_generation_pb2.FAILED
+                response.error_message = f"Trạng thái không xác định: {status}"
                 
             return response
             
@@ -106,13 +132,15 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
         task_id = request.task_id
         logger.info(f"Yêu cầu hủy Task ID: {task_id}")
         try:
-            # Thu hồi task (revoke) trong Celery
-            # terminate=True để ngắt tiến trình nếu task đang chạy
+            # Soft revoke trước để task chưa chạy sẽ bị chặn ngay.
+            celery_app.control.revoke(task_id, terminate=False)
+            # Nếu task đã bắt đầu chạy thì terminate để dừng sớm.
             celery_app.control.revoke(task_id, terminate=True)
+            vram_manager.clear_cache()
             logger.info(f"Đã gửi lệnh hủy Task ID: {task_id} thành công")
             return image_generation_pb2.CancelResponse(
                 task_id=task_id,
-                status="CANCELLED"
+                status=image_generation_pb2.FAILED
             )
         except Exception as e:
             logger.error(f"Lỗi khi hủy Task ID {task_id}: {str(e)}")
@@ -120,7 +148,7 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             context.set_details(str(e))
             return image_generation_pb2.CancelResponse(
                 task_id=task_id,
-                status="FAILED"
+                status=image_generation_pb2.FAILED
             )
 
     def CheckHealth(self, request, context):
@@ -132,4 +160,19 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             is_alive=True,
             versions={"service": "image-ai", "version": "1.0.0"}
         )
+
+    def CheckGpuHealth(self, request, context):
+        info = vram_manager.get_gpu_memory_info()
+        return image_generation_pb2.CheckGpuHealthResponse(
+            is_healthy=info.is_gpu_available,
+            gpu_name=info.device_name,
+            gpu_memory_usage=str(info.allocated_mb),
+            gpu_memory_free=str(info.free_gpu_available),
+            gpu_memory_total=str(info.allocated_mb + info.free_gpu_available),
+            gpu_memory_used=str(info.reserved_mb),
+        )
+
+    def ClearGpuCache(self, request, context):
+        vram_manager.clear_cache()
+        return image_generation_pb2.ClearGpuCacheResponse(is_cleared=True)
 

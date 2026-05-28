@@ -7,10 +7,9 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
 ## Trạng thái MVP hiện tại (theo code hiện tại)
 *   **Đã chạy được (Kiểm tra bằng `test_client.py`)**: gRPC Server, FastAPI `/healthz`, Celery Worker, Redis Cache, MinIO Storage, SDXL Turbo Pipeline, Pillow Captioning.
 *   **Cancel Task (gRPC)**: đã có hàm `CancelTask` và dùng `celery_app.control.revoke(..., terminate=True)` (nhưng cần production hardening).
-*   **Safety Checker**: hiện đang **giả lập** (luôn `is_safe=True`) nên vẫn chưa đạt production.
-*   **Metrics**: endpoint `/metrics` hiện trả về dict tạm, chưa export Prometheus thật.
-*   **Cache**: hiện dùng hash theo `prompt + seed + caption_text + width + height` (chưa gồm `steps`/model/lora), nên cần “cache correctness”.
-
+*   **Safety Checker**: đã dùng classifier NSFW thực (`Falconsai/nsfw_image_detection`), cần benchmark thêm độ chính xác theo tập dữ liệu luận văn.
+*   **Metrics**: `/metrics` đã export Prometheus (`prometheus_client`) với counter/histogram chính.
+*   **Cache**: đã nâng hash key theo schema v2 (`prompt normalize + seed + caption + width/height + steps + model_id + guidance_scale + lora_id`) và có version key.
 ---
 
 ## Tiêu chí “DONE” để gọi là production-ready (gợi ý)
@@ -36,10 +35,10 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
     - [x] Định nghĩa `src/config/settings.py` sử dụng `Pydantic Settings`
     - [x] Chuyển đổi toàn bộ `os.getenv` trong mã nguồn sang sử dụng `settings` mới
     - [x] Tạo file `.env.example` làm mẫu cấu hình
-- [ ] **1.4 Production config discipline**
-    - [ ] Tách rõ DEV/PROD bằng biến môi trường (ví dụ: prefix `IMAGE_AI_...`)
-    - [ ] Bổ sung setting cho: `PRESIGNED_TTL_SECONDS`, `REDIS_CACHE_TTL_SECONDS`, `CELERY_TASK_TIME_LIMIT`, `MAX_STEPS`, `MAX_WIDTH/HEIGHT`
-    - [ ] Pin version các thư viện quan trọng để tránh vỡ môi trường (diffusers/torch không khớp)
+- [x] **1.4 Production config discipline**
+    - [x] Tách rõ DEV/PROD bằng biến môi trường (ví dụ: prefix `IMAGE_AI_...`)
+    - [x] Bổ sung setting cho: `PRESIGNED_TTL_SECONDS`, `REDIS_CACHE_TTL_SECONDS`, `CELERY_TASK_TIME_LIMIT`, `MAX_STEPS`, `MAX_WIDTH/HEIGHT`
+    - [x] Pin version các thư viện quan trọng để tránh vỡ môi trường (diffusers/torch không khớp)
 - [ ] **1.5 Model artifact quản lý**
     - [ ] Xác định model id(s), cách tải model (local path vs remote hub) và hành vi khi offline
     - [ ] Nếu dùng LoRA: quy ước nơi lưu cache weights (RAM/disk) để giảm download lặp
@@ -83,13 +82,13 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
     - [ ] Cache font objects (tránh load font liên tục)
     - [ ] Chuẩn hóa font fallback khi font không tồn tại
     - [ ] Giới hạn độ dài caption và fallback bố cục (tránh tràn layout)
-- [ ] **2.9 Cache correctness (hash key phải bao phủ mọi tham số ảnh hưởng output)**
-    - [ ] Bổ sung các tham số vào hash:
-        - [ ] `steps`
-        - [ ] `model_id` (và variant nếu có)
-        - [ ] LoRA id/name (nếu có)
-        - [ ] Các tham số pipeline ảnh hưởng output (guidance_scale, format nếu ảnh hưởng)
-    - [ ] Chuẩn hóa prompt đầu vào (trim, collapse whitespace, normalize newline) để giảm “cache miss giả”
+- [x] **2.9 Cache correctness (hash key phải bao phủ mọi tham số ảnh hưởng output)**
+    - [x] Bổ sung các tham số vào hash:
+        - [x] `steps`
+        - [x] `model_id` (và variant nếu có)
+        - [x] LoRA id/name (nếu có)
+        - [x] Các tham số pipeline ảnh hưởng output (guidance_scale, format nếu ảnh hưởng)
+    - [x] Chuẩn hóa prompt đầu vào (trim, collapse whitespace, normalize newline) để giảm “cache miss giả”
 - [ ] **2.10 Determinism & seed policy**
     - [ ] Nếu `seed=-1`: sinh seed ngẫu nhiên và **lưu seed thực** vào log/task_result để tái lập
     - [ ] Dùng `torch.Generator` theo device đúng cách để seed có ý nghĩa
@@ -110,11 +109,11 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
     - [x] Triển khai `src/cache/redis_cache.py` băm chuỗi tham số (MD5) thành Hash Key
     - [x] Lưu Cache Hit liên kết ảnh MinIO để tránh chạy lại GPU cho prompt trùng lặp
     - [x] Thiết lập TTL (Time-To-Live) tự động xóa cache sau 14 ngày
-- [ ] **3.4 Thundering herd protection (cache miss đồng thời)**
-    - [ ] Khi cache miss: dùng Redis lock theo `hash_key` (SET NX + expire) để chỉ **một** task chạy inference
-    - [ ] Các request còn lại chờ/hoặc poll đến khi key được set (tránh 2-3 GPU job trùng prompt)
-- [ ] **3.5 Cache versioning**
-    - [ ] Tạo prefix version cho cache (ví dụ `img_cache_v2:`) để khi thay đổi hash logic không bị hit sai
+- [x] **3.4 Thundering herd protection (cache miss đồng thời)**
+    - [x] Khi cache miss: dùng Redis lock theo `hash_key` (SET NX + expire) để chỉ **một** task chạy inference
+    - [x] Các request còn lại chờ/hoặc poll đến khi key được set (tránh 2-3 GPU job trùng prompt)
+- [x] **3.5 Cache versioning**
+    - [x] Tạo prefix version cho cache (ví dụ `img_cache_v2:`) để khi thay đổi hash logic không bị hit sai
 - [ ] **3.6 Celery result vs Redis cache thống nhất**
     - [ ] Đảm bảo status `PENDING/PROCESSING/SUCCESS/FAILED/CANCELLED` được ánh xạ nhất quán
     - [ ] Nếu task bị revoke: Redis cache không được set “thành công” khi ảnh chưa tồn tại
@@ -126,23 +125,23 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
     - [x] Triển khai `GenerateImageAsync` đẩy task vào hàng đợi và phản hồi tức thì Task ID
     - [x] Triển khai `GetTaskStatus` lấy trạng thái từ Celery backend
     - [x] Triển khai `CheckHealth` kiểm tra trạng thái sức khỏe gRPC
-- [x] **4.2 RPC Cancel Task (baseline đã có)**
+- [x] **4.2 gRPC Cancel Task (baseline đã có)**
     - [x] Triển khai hàm `CancelTask` trong `src/service/image_service.py` bằng `celery_app.control.revoke(..., terminate=True)`
     - [ ] Hardening production:
-        - [ ] Hỗ trợ “soft revoke” trước khi terminate (giảm nguy cơ dừng giữa chừng)
+        - [x] Hỗ trợ “soft revoke” trước khi terminate (giảm nguy cơ dừng giữa chừng)
         - [ ] Cập nhật trạng thái task về `CANCELLED` rõ ràng (tránh để task treo)
-        - [ ] Đảm bảo cleanup VRAM chạy kể cả khi bị revoke/terminate
-- [ ] **4.3 Input validation & OOM prevention**
-    - [ ] Validate `width/height` nằm trong giới hạn cho thiết bị mục tiêu
-    - [ ] Validate `num_inference_steps` (ví dụ 1..20) để tránh request quá nặng
-    - [ ] Validate `caption_text` (giới hạn độ dài ký tự)
-    - [ ] Nếu invalid -> trả gRPC error code phù hợp và không push job vào queue
+        - [x] Đảm bảo cleanup VRAM chạy kể cả khi bị revoke/terminate
+- [x] **4.3 Input validation & OOM prevention**
+    - [x] Validate `width/height` nằm trong giới hạn cho thiết bị mục tiêu
+    - [x] Validate `num_inference_steps` (ví dụ 1..20) để tránh request quá nặng
+    - [x] Validate `caption_text` (giới hạn độ dài ký tự)
+    - [x] Nếu invalid -> trả gRPC error code phù hợp và không push job vào queue
 - [x] **4.4 Tránh lỗi Multi-processing trên macOS (SIGSEGV)**
     - [x] Chạy Celery Worker ở chế độ đơn tiến trình `--pool=solo` khi dev trên Mac
 - [x] **4.5 Sửa lỗi gRPC Backend**
     - [x] Truyền đối tượng `celery_app` vào `AsyncResult` trong gRPC để đọc trạng thái chính xác
 - [ ] **4.6 Worker reliability (timeouts/retries/circuit breaking)**
-    - [ ] `task_time_limit` / `soft_time_limit` để tránh task chết ngầm
+    - [x] `task_time_limit` / `soft_time_limit` để tránh task chết ngầm
     - [ ] Retry chính sách cho lỗi MinIO/Redis (network) với số lần retry giới hạn
     - [ ] Không retry khi gặp OOM (hoặc retry với steps nhỏ hơn) để tránh spam GPU
     - [ ] Bổ sung vòng bắt exception có taxonomy rõ ràng để trả `error_message` dễ hiểu
@@ -155,23 +154,23 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
 ---
 
 ## Phase 5: Monitoring & Monitoring API
-- [ ] **5.1 Prometheus Metrics (export thật)**
-    - [ ] Thay `/metrics` thành Prometheus exporter bằng `prometheus_client`
-    - [ ] Metrics tối thiểu nên có:
-        - [ ] `image_requests_total{status=...}`
-        - [ ] `task_duration_seconds_bucket` (Histogram) theo `cached`/`success`
+- [x] **5.1 Prometheus Metrics (export thật)**
+    - [x] Thay `/metrics` thành Prometheus exporter bằng `prometheus_client`
+    - [x] Metrics tối thiểu nên có:
+        - [x] `image_requests_total{status=...}`
+        - [x] `task_duration_seconds_bucket` (Histogram) theo `cached`/`success`
         - [ ] `cache_hit_total` và `cache_hit_ratio` (nếu tính được)
-        - [ ] `minio_upload_errors_total`
-        - [ ] `safety_blocks_total`
+        - [x] `minio_upload_errors_total`
+        - [x] `safety_blocks_total`
     - [ ] GPU metrics thực tế:
         - [ ] Dùng `pynvml` để đọc VRAM/utility (nếu chạy CUDA)
         - [ ] Nếu chạy MPS/CPU: export placeholder hoặc tách label `device_type`
     - [ ] (Optional) worker multiprocess mode nếu Celery fork nhiều process
 - [x] **5.2 Health Monitor API**
     - [x] FastAPI `/healthz` kiểm tra kết nối Redis & MinIO
-    - [ ] Mở rộng health:
-        - [ ] kiểm tra GPU availability (CUDA/MPS)
-        - [ ] kiểm tra pipeline/model artifact sẵn sàng (để tránh “server sống nhưng generate chết”)
+    - [x] Mở rộng health:
+        - [x] kiểm tra GPU availability (CUDA/MPS)
+        - [x] kiểm tra pipeline/model artifact sẵn sàng (để tránh “server sống nhưng generate chết”)
 - [ ] **5.3 Tracing (tuỳ chọn cho luận văn)**
     - [ ] Gợi ý dùng OpenTelemetry + Jaeger/Zipkin nếu muốn chương “observability” thuyết phục hơn
 

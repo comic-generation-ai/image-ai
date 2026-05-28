@@ -14,8 +14,21 @@ service ImageGenerationService {
 
   // Kiểm tra sức khỏe dịch vụ gRPC
   rpc CheckHealth (CheckHealthRequest) returns (CheckHealthResponse);
+
+  // Kiểm tra sức khỏe của GPU
+  rpc CheckGpuHealth (CheckGpuHealthRequest) returns (CheckGpuHealthResponse);
+
+  // Giải phóng cache của GPU
+  rpc ClearGpuCache (ClearGpuCacheRequest) returns (ClearGpuCacheResponse);
 }
 
+
+enum ImageGenerationStatus {
+  PENDING = 0;
+  PROCESSING = 1;
+  SUCCESS = 2;
+  FAILED = 3;
+}
 
 message GenerateImageRequest {
   string prompt = 1;              // Prompt tiếng Anh đã được dịch và thêm style
@@ -28,16 +41,17 @@ message GenerateImageRequest {
 
 message GenerateImageResponse {
   string task_id = 1;             // ID duy nhất của Task sinh ảnh được đẩy vào queue
-  string status = 2;              // Trạng thái ban đầu (ví dụ: PENDING)
+  ImageGenerationStatus status = 2;              // Trạng thái ban đầu (ví dụ: PENDING)
 }
 
 message TaskStatusRequest {
   string task_id = 1;
+
 }
 
 message TaskStatusResponse {
   string task_id = 1;
-  string status = 2;              // PENDING, PROCESSING, SUCCESS, FAILED
+  ImageGenerationStatus status = 2;              // PENDING, PROCESSING, SUCCESS, FAILED
   string minio_url = 3;           // Presigned URL trỏ tới ảnh trên MinIO (nếu SUCCESS)
   string error_message = 4;       // Thông báo lỗi nếu thất bại
 }
@@ -47,7 +61,7 @@ message CancelRequest{
 }
 message CancelResponse{
   string task_id = 1;
-  string status = 2;
+  ImageGenerationStatus status = 2;
 }
 
 message CheckHealthRequest{}
@@ -55,4 +69,22 @@ message CheckHealthRequest{}
 message CheckHealthResponse{
   bool is_alive = 1;
   map<string, string> versions = 2;
+}
+
+
+message CheckGpuHealthRequest{}
+
+message CheckGpuHealthResponse{
+  bool is_healthy = 1;
+  string gpu_name = 2;
+  string gpu_memory_usage = 3;
+  string gpu_memory_free = 4;
+  string gpu_memory_total = 5;
+  string gpu_memory_used = 6;
+}
+
+message ClearGpuCacheRequest{}
+
+message ClearGpuCacheResponse{
+  bool is_cleared = 1;
 }

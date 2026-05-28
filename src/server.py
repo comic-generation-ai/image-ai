@@ -3,7 +3,7 @@ import os
 import asyncio
 from concurrent import futures
 import grpc
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 import uvicorn
 import threading
 
@@ -12,6 +12,9 @@ from logger.config import get_logger
 from service.image_service import ImageGenerationService
 from storage import minio_storage_client
 from cache.redis_cache import redis_cache_manager
+from core.vram_manager import vram_manager
+from core.pipeline_runner import pipeline_runner
+from metrics import prometheus_response
 
 # Import gRPC generated classes
 try:
@@ -44,6 +47,7 @@ def health_check():
         redis_status = {"healthy": False, "error": str(e)}
 
     overall_healthy = minio_status.get("healthy", False) and redis_status.get("healthy", False)
+    gpu_status = vram_manager.get_gpu_memory_info()
     
     return {
         "status": "healthy" if overall_healthy else "unhealthy",
@@ -52,17 +56,21 @@ def health_check():
         "dependencies": {
             "minio": minio_status,
             "redis": redis_status
-        }
+        },
+        "gpu": {
+            "device": gpu_status.device_name,
+            "is_gpu_available": gpu_status.is_gpu_available,
+            "allocated_mb": gpu_status.allocated_mb,
+            "reserved_mb": gpu_status.reserved_mb,
+            "free_gpu_available": gpu_status.free_gpu_available,
+        },
+        "pipeline_ready": pipeline_runner.pipeline is not None,
     }
 
 @app.get("/metrics")
 def get_metrics():
-    """Metrics phục vụ cho Prometheus giám sát hiệu năng."""
-    # Bạn có thể đọc chỉ số GPU thực tế tại đây
-    return {
-        "active_gpu_tasks": 0,
-        "service_status": "online"
-    }
+    payload, content_type = prometheus_response()
+    return Response(content=payload, media_type=content_type)
 
 def start_fastapi_server(host: str, port: int):
     logger.info(f"Đang khởi động FastAPI Health Server tại http://{host}:{port}...")

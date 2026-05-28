@@ -18,7 +18,10 @@ celery_app.conf.update(
     accept_content=settings.CELERY_ACCEPT_CONTENT,
     timezone=settings.CELERY_TIMEZONE,
     enable_utc=settings.CELERY_ENABLE_UTC,
-    
+    task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    task_track_started=True,
+
     # Rất quan trọng cho GPU Worker: Chỉ lấy 1 task tại một thời điểm
     # Tránh nạp đè nhiều tác vụ sinh ảnh làm sập GPU
     worker_prefetch_multiplier=1
