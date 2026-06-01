@@ -31,12 +31,14 @@ enum ImageGenerationStatus {
 }
 
 message GenerateImageRequest {
-  string prompt = 1;              // Prompt tiếng Anh đã được dịch và thêm style
-  int32 width = 2;                // Chiều rộng ảnh (mặc định cho SDXL là 1024)
-  int32 height = 3;               // Chiều cao ảnh (mặc định cho SDXL là 1024)
-  int32 seed = 4;                 // Seed để kiểm soát tính ngẫu nhiên (-1 cho ngẫu nhiên)
-  int32 num_inference_steps = 5;  // Số bước khử nhiễu (4-8 cho SDXL Turbo)
-  string caption_text = 6;        // Văn bản lời thoại tiếng Việt chèn vào khung truyện
+  string reference_image_url = 1; // Ảnh tham chiếu
+  string prompt = 2;              // Prompt tiếng Anh đã được dịch và thêm style
+  int32 width = 3;                // Chiều rộng ảnh (mặc định cho SDXL là 1024)
+  int32 height = 4;               // Chiều cao ảnh (mặc định cho SDXL là 1024)
+  int32 seed = 5;                 // Seed để kiểm soát tính ngẫu nhiên (-1 cho ngẫu nhiên)
+  int32 num_inference_steps = 6;  // Số bước khử nhiễu (4-8 cho SDXL Turbo)
+  string caption_text = 7;        // Văn bản lời thoại tiếng Việt chèn vào khung truyện (legacy)
+  repeated SpeechBuble speech_bubbles = 8; // Danh sách bong bóng thoại động
 }
 
 message GenerateImageResponse {
@@ -87,4 +89,11 @@ message ClearGpuCacheRequest{}
 
 message ClearGpuCacheResponse{
   bool is_cleared = 1;
+}
+
+message SpeechBuble {
+  string text = 1;
+  string bubble_type = 2; // SPEECH, THOUGHT, SCREAM
+  float x_pos = 3;
+  float y_pos = 4;
 }

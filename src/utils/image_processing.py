@@ -1,8 +1,54 @@
 import os
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from functools import lru_cache
+
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from config.settings import get_settings
 from logger.config import get_logger
 
 logger = get_logger(__name__)
+settings = get_settings()
+
+DEFAULT_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+)
+
+
+@lru_cache(maxsize=16)
+def _load_font(font_path: str | None, font_size: int) -> ImageFont.ImageFont:
+    candidates = [font_path] if font_path else []
+    candidates.extend(DEFAULT_FONT_CANDIDATES)
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            try:
+                return ImageFont.truetype(candidate, font_size)
+            except Exception as e:
+                logger.warning(f"Không thể load font {candidate}: {e}")
+    return ImageFont.load_default()
+
+
+def enhance_comic_image(image: Image.Image) -> Image.Image:
+    """
+    Tăng độ nét/màu nhẹ để ảnh đọc giống panel hoạt hình hơn mà không đổi bố cục.
+    """
+    if not settings.COMIC_POSTPROCESS_ENABLED:
+        return image.convert("RGB")
+
+    enhanced = image.convert("RGB")
+    enhanced = ImageEnhance.Color(enhanced).enhance(settings.COLOR_BOOST)
+    enhanced = ImageEnhance.Contrast(enhanced).enhance(settings.CONTRAST_BOOST)
+    enhanced = enhanced.filter(
+        ImageFilter.UnsharpMask(
+            radius=settings.SHARPEN_RADIUS,
+            percent=settings.SHARPEN_PERCENT,
+            threshold=settings.SHARPEN_THRESHOLD,
+        )
+    )
+    return enhanced
+
 
 def wrap_text(text: str, draw: ImageDraw.Draw, font: ImageFont.FreeTypeFont, max_width: int) -> list:
     """
@@ -21,7 +67,8 @@ def wrap_text(text: str, draw: ImageDraw.Draw, font: ImageFont.FreeTypeFont, max
 
         if text_width > max_width:
             current_line.pop()
-            lines.append(" ".join(current_line))
+            if current_line:
+                lines.append(" ".join(current_line))
             current_line = [word]
 
     if current_line:
@@ -37,7 +84,7 @@ def add_caption_to_comic(image: Image.Image, text: str, font_path: str = None) -
     3. Render văn bản tiếng Việt Unicode (Roboto).
     """
     if not text:
-        return image
+        return image.convert("RGB") if image.mode != "RGB" else image
 
     logger.info(f"Đang tiến hành chèn lời thoại tiếng Việt: '{text}' vào ảnh...")
 
@@ -50,21 +97,16 @@ def add_caption_to_comic(image: Image.Image, text: str, font_path: str = None) -
         overlay = Image.new("RGBA", image_with_border.size, (0, 0, 0, 0))
         draw_overlay = ImageDraw.Draw(overlay)
 
-        # Thiết lập font chữ (sử dụng font mặc định nếu không truyền đường dẫn)
+        # Thiết lập font chữ (cache để tránh load lại mỗi task)
         font_size = 28
-        if font_path and os.path.exists(font_path):
-            font = ImageFont.truetype(font_path, font_size)
-        else:
-            # Fallback nếu không tìm thấy Roboto trong hệ thống
-            font = ImageFont.load_default()
+        font = _load_font(font_path, font_size)
 
         # Thiết lập kích thước tối đa của hộp thoại ở đáy ảnh
         padding = 20
         box_max_width = width - (padding * 4)
-        
+
         # Gọi hàm tự động xuống dòng
         lines = wrap_text(text, draw_overlay, font, box_max_width)
-        formatted_text = "\n".join(lines)
 
         # Tính toán chiều cao cần thiết cho hộp thoại dựa trên số dòng chữ
         line_heights = []
@@ -118,5 +160,6 @@ def add_caption_to_comic(image: Image.Image, text: str, font_path: str = None) -
 
     except Exception as e:
         logger.error(f"Lỗi hậu kỳ Pillow: {str(e)}")
-        # Trả về ảnh viền đen thô nếu có sự cố để tránh hỏng luồng sinh ảnh chính
-        return ImageOps.expand(image, border=15, fill="black")
+        # Giữ ảnh gốc (không chỉ viền đen) để tránh MinIO nhận panel gần như toàn đen
+        fallback = image.convert("RGB") if image.mode != "RGB" else image
+        return fallback

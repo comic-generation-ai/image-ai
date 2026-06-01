@@ -4,6 +4,7 @@ torchvision
 diffusers>=0.25.0
 transformers>=4.36.0
 accelerate>=0.26.0
+peft>=0.10.0
 
 # gRPC and APIs
 grpcio>=1.59.0

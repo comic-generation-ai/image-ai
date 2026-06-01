@@ -46,8 +46,8 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k"
-        caption = "Astronaut in a jungle"
+        prompt = "After school, there was a brilliant sunset"
+        caption = "Sau giờ tan học là hoàng hôn rực rỡ"
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")
@@ -102,12 +102,12 @@ def test_cancel_task():
         # Gửi request sinh ảnh
         print("Đang gửi yêu cầu sinh ảnh để hủy...")
         req = image_generation_pb2.GenerateImageRequest(
-            prompt="A fast running red sportscar",
+            prompt="A cat sitting on a futuristic motorcycle in a cyberpunk cityscape at night" ,
             width=512,
             height=512,
             seed=12,
             num_inference_steps=4,
-            caption_text="Chạy trốn!"
+            caption_text="Một con mèo ngồi trên chiếc xe máy tương lai trong cảnh thành phố cyberpunk về đêm"
         )
         resp = stub.GenerateImageAsync(req)
         task_id = resp.task_id

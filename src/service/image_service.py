@@ -30,9 +30,9 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
         logger.info(f"Đã nhận yêu cầu sinh ảnh gRPC từ Orchestrator | Prompt: '{request.prompt[:30]}...'")
         
         try:
-            width = request.width if request.width > 0 else 1024
-            height = request.height if request.height > 0 else 1024
-            steps = request.num_inference_steps if request.num_inference_steps > 0 else 8
+            width = request.width if request.width > 0 else settings.DEFAULT_WIDTH
+            height = request.height if request.height > 0 else settings.DEFAULT_HEIGHT
+            steps = request.num_inference_steps if request.num_inference_steps > 0 else settings.DEFAULT_STEPS
 
             if width <= 0 or width > settings.MAX_WIDTH or width % 8 != 0:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -175,4 +175,3 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
     def ClearGpuCache(self, request, context):
         vram_manager.clear_cache()
         return image_generation_pb2.ClearGpuCacheResponse(is_cleared=True)
-

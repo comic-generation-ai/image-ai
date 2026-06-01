@@ -50,16 +50,16 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
     - [x] Triển khai `src/core/pipeline_runner.py` nạp model SDXL Turbo
     - [x] Hỗ trợ tự động chuyển thiết bị (CUDA / Apple Silicon MPS / CPU)
     - [x] Áp dụng VAE Slicing và Tiling để tối ưu bộ nhớ
-- [ ] **2.2 Model warmup & singleton pipeline per worker**
-    - [ ] Đảm bảo pipeline được khởi tạo **1 lần khi worker start**, không khởi tạo lại cho mỗi task
-    - [ ] (Optional) warmup một lần inference cực nhẹ để “mở khóa” kernels trước khi nhận request thật
-    - [ ] Gắn warmup vào lifecycle Celery worker (ví dụ signal hoặc init global)
+- [x] **2.2 Model warmup & singleton pipeline per worker**
+    - [x] Đảm bảo pipeline được khởi tạo **1 lần khi worker start**, không khởi tạo lại cho mỗi task
+    - [x] (Optional) warmup một lần inference cực nhẹ để “mở khóa” kernels trước khi nhận request thật
+    - [x] Gắn warmup vào lifecycle Celery worker (ví dụ signal hoặc init global)
 - [x] **2.3 VRAM & Memory Management**
     - [x] Triển khai `src/core/vram_manager.py` dọn dẹp cache sau mỗi lần sinh ảnh
     - [x] Quản lý khóa Lock tuần tự hóa tác vụ trên GPU
-- [ ] **2.4 VRAM cleanup on cancel/timeout**
-    - [ ] Bảo đảm `vram_manager.clear_cache()` chạy trong mọi nhánh: SUCCESS/FAILED/CANCELLED/timeout/revoke
-    - [ ] Xử lý trường hợp task bị terminate giữa chừng: hạn chế “kẹt” VRAM (document hạn chế + cách mitigations)
+- [x] **2.4 VRAM cleanup on cancel/timeout**
+    - [x] Bảo đảm `vram_manager.clear_cache()` chạy trong mọi nhánh: SUCCESS/FAILED/CANCELLED/timeout/revoke
+    - [x] Xử lý trường hợp task bị terminate giữa chừng: hạn chế “kẹt” VRAM (document hạn chế + cách mitigations)
 - [ ] **2.5 Dynamic LoRA Loader**
     - [ ] Hoàn thiện `src/core/lora_loader.py` để nạp/hủy LoRA thực từ diffusers (bật/tắt adapter đúng cách)
     - [ ] Thiết kế cơ chế “LoRA per request”: mỗi task có adapter name riêng để tránh xung đột request song song
@@ -92,6 +92,22 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
 - [ ] **2.10 Determinism & seed policy**
     - [ ] Nếu `seed=-1`: sinh seed ngẫu nhiên và **lưu seed thực** vào log/task_result để tái lập
     - [ ] Dùng `torch.Generator` theo device đúng cách để seed có ý nghĩa
+- [ ] **2.11 Character Consistency (Tính nhất quán nhân vật)**
+    - [ ] Tích hợp IP-Adapter hoặc ControlNet Reference-Only vào pipeline SDXL Turbo
+    - [ ] Đọc ảnh tham chiếu từ `reference_image_url` được truyền từ gRPC Request
+    - [ ] Cache đặc trưng nhân vật (feature embeddings) để tránh tính toán lại
+- [ ] **2.12 Dynamic & Advanced Speech Bubbles (Khung thoại động)**
+    - [ ] Triển khai parse danh sách `speech_bubbles` từ gRPC Request (thay cho `caption_text` cố định)
+    - [ ] Cải tiến Pillow vẽ khung thoại ở tọa độ động `(x_pos, y_pos)` với nhiều style (SPEECH, THOUGHT, SCREAM)
+- [ ] **2.13 AI Image Upscaling (Siêu độ phân giải)**
+    - [ ] Tích hợp mô hình Real-ESRGAN hoặc thuật toán nội suy chất lượng cao để phóng to ảnh lên 2K/4K
+    - [ ] Cho phép bật/tắt upscaling theo config hoặc gRPC parameter để tiết kiệm GPU
+- [ ] **2.14 Pre-GPU Text Moderation (Chặn từ khóa NSFW)**
+    - [ ] Thực hiện kiểm tra, lọc từ khóa nhạy cảm trên `prompt` đầu vào ngay tại gRPC Server
+    - [ ] Từ chối xử lý sớm các prompt vi phạm chính sách trước khi đưa vào Celery/GPU queue
+- [ ] **2.15 Page Panel Layout Assembler (Ghép trang truyện)**
+    - [ ] Triển khai module ghép nhiều panel thành một trang dọc (Webtoon style) hoặc trang lưới (Manga style)
+    - [ ] Vẽ viền ngăn cách (panel borders) giữa các hình ảnh thành viên trong trang
 
 ---
 
@@ -127,9 +143,9 @@ Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM
     - [x] Triển khai `CheckHealth` kiểm tra trạng thái sức khỏe gRPC
 - [x] **4.2 gRPC Cancel Task (baseline đã có)**
     - [x] Triển khai hàm `CancelTask` trong `src/service/image_service.py` bằng `celery_app.control.revoke(..., terminate=True)`
-    - [ ] Hardening production:
+    - [x] Hardening production:
         - [x] Hỗ trợ “soft revoke” trước khi terminate (giảm nguy cơ dừng giữa chừng)
-        - [ ] Cập nhật trạng thái task về `CANCELLED` rõ ràng (tránh để task treo)
+        - [x] Cập nhật trạng thái task về `CANCELLED` rõ ràng (tránh để task treo)
         - [x] Đảm bảo cleanup VRAM chạy kể cả khi bị revoke/terminate
 - [x] **4.3 Input validation & OOM prevention**
     - [x] Validate `width/height` nằm trong giới hạn cho thiết bị mục tiêu

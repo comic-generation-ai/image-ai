@@ -123,6 +123,12 @@ class MinioStorageClient:
             img_byte_arr = io.BytesIO()
             # Determine storage format based on content_type
             img_format = "JPEG" if content_type in ["image/jpeg", "image/jpg"] else "PNG"
+            if img_format == "JPEG":
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+            elif image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGB")
+
             save_kwargs: Dict[str, Any] = {}
             if img_format == "JPEG":
                 save_kwargs.update(
@@ -146,6 +152,12 @@ class MinioStorageClient:
             image.save(img_byte_arr, format=img_format, **save_kwargs)
             img_byte_arr.seek(0)  # Move stream pointer to start
             file_length = img_byte_arr.getbuffer().nbytes
+
+            min_bytes = self.settings.MIN_UPLOAD_BYTES
+            if file_length < min_bytes:
+                raise ValueError(
+                    f"File ảnh quá nhỏ ({file_length} bytes < {min_bytes} bytes) — có thể bị hỏng."
+                )
 
             # 3. Use put_object to push byte stream from RAM to MinIO Server
             self.client.put_object(
