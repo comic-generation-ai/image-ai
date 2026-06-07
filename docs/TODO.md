@@ -2,242 +2,251 @@
 
 Đây là danh sách các tác vụ triển khai dịch vụ sinh ảnh và hậu kỳ tự động (`image-ai`) trong hệ thống ComicSystem.
 
-Mục tiêu: đưa MVP hiện tại lên mức **ổn định (không sập VRAM)**, **đúng logic cache**, và **production-ready** đủ để đưa vào luận văn (kiến trúc, độ tin cậy, đo lường).
+Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong bóng thoại theo nhân vật**, **nhất quán nhân vật** giữa các khung, ảnh **sắc nét không nhòe**, đủ số liệu **benchmark Mac vs GPU cloud** cho luận văn.
 
-## Trạng thái MVP hiện tại (theo code hiện tại)
-*   **Đã chạy được (Kiểm tra bằng `test_client.py`)**: gRPC Server, FastAPI `/healthz`, Celery Worker, Redis Cache, MinIO Storage, SDXL Turbo Pipeline, Pillow Captioning.
-*   **Cancel Task (gRPC)**: đã có hàm `CancelTask` và dùng `celery_app.control.revoke(..., terminate=True)` (nhưng cần production hardening).
-*   **Safety Checker**: đã dùng classifier NSFW thực (`Falconsai/nsfw_image_detection`), cần benchmark thêm độ chính xác theo tập dữ liệu luận văn.
-*   **Metrics**: `/metrics` đã export Prometheus (`prometheus_client`) với counter/histogram chính.
-*   **Cache**: đã nâng hash key theo schema v2 (`prompt normalize + seed + caption + width/height + steps + model_id + guidance_scale + lora_id`) và có version key.
 ---
 
-## Tiêu chí “DONE” để gọi là production-ready (gợi ý)
-*   Không chạy lại GPU sai do cache hit nhầm (cache key đúng tham số ảnh hưởng kết quả).
-*   Có cơ chế chống thundering herd (cache miss nhiều request giống nhau chỉ tạo 1 lần inference).
-*   Safety checker chặn NSFW/ nội dung không phù hợp và trả trạng thái rõ ràng.
-*   Metrics Prometheus thật + log có correlation id để đối soát.
-*   Có retry/timeout cho các lỗi mạng (MinIO/Redis) nhưng không retry vô hạn khi OOM.
-*   Cancel làm sạch VRAM và cập nhật trạng thái hợp lý (không để task treo).
+## Lộ trình triển khai (3 giai đoạn)
+
+| Giai đoạn | Mục tiêu | Tiêu chí hoàn thành |
+|-----------|----------|---------------------|
+| **A — Mac ổn định** | Pipeline chạy đúng `.env`, đo được baseline, không OOM | 1 panel 512×512 ≤ 90s (sd-turbo, offload tắt); cache hit < 1s |
+| **B — Tính năng truyện** | 4 panel + bubble đa nhân vật + ghép 2×2 + đồng bộ nhân vật | API `GenerateComicPage`; ảnh trang hoàn chỉnh trên MinIO |
+| **C — GPU cloud (luận văn)** | Deploy worker CUDA, benchmark so sánh, demo bảo vệ | 4 panel ≤ 2 phút (1 GPU); bảng Mac vs Cloud trong thesis |
+
+> **Lưu ý vận hành:** Sau mỗi lần sửa `.env` phải **restart Celery worker** — model/LoRA/offload được nạp **1 lần lúc worker start**, không đọc lại `.env` khi đang chạy.
+
+---
+
+## Benchmark đã đo (baseline — cần restart worker để cập nhật)
+
+| Cấu hình (log 2026-06-06) | Diffusion 4 steps | Tổng task | Ghi chú |
+|---------------------------|-------------------|-----------|---------|
+| SDXL Turbo + LoRA + MPS sequential offload | ~192s (~48s/step) | **212s** | Worker start 09:54 — **chưa áp dụng `.env` mới** |
+| Cache hit (cùng prompt/seed) | 0s GPU | **0.01s** | Redis cache hoạt động đúng |
+| `.env` hiện tại (chưa restart worker) | sd-turbo, LoRA off, offload off | *chưa đo* | Cần restart worker rồi chạy lại `test_client.py` |
+
+---
+
+## Trạng thái MVP hiện tại (theo code + log)
+
+*   **Đã chạy E2E** (`test_client.py`): gRPC, Celery, Redis, MinIO, diffusion, Pillow caption, cache hit/miss.
+*   **Pipeline**: hỗ trợ SD 1.x Turbo + SDXL Turbo; CUDA / MPS / CPU; warmup singleton.
+*   **LoRA**: loader cơ bản có (`lora_loader.py`); chưa LoRA per-request / MinIO artifact.
+*   **Safety**: `Falconsai/nsfw_image_detection` đã tích hợp (TODO doc cũ chưa cập nhật).
+*   **Caption**: 1 bubble cố định ở đáy ảnh (`caption_text`); proto có `speech_bubbles` nhưng **chưa implement**.
+*   **Trang 2×2 / nhất quán nhân vật**: **chưa có** — cần Phase B.
+*   **Cancel**: có; `test_cancel_task` gửi revoke sau khi task đã chạy xong → revoke muộn (cần hardening 4.2).
+
+---
+
+## Tiêu chí “DONE” production-ready
+
+*   Cache key đúng mọi tham số ảnh hưởng output (đã có v5).
+*   Thundering herd lock khi cache miss đồng thời (đã có).
+*   Safety checker + policy FAILED rõ ràng.
+*   Metrics + benchmark reproducible (Mac + Cloud).
+*   Retry MinIO/Redis; không retry vô hạn khi OOM.
+*   Cancel sạch VRAM; không revoke task đã SUCCESS.
 
 ---
 
 ## Phase 1: Setup & Infrastructure
+
 - [x] **1.1 Cấu trúc & Môi trường**
-    - [x] Khởi tạo virtual environment (`env`)
-    - [x] Định nghĩa file dependencies `requirements.txt`
-    - [x] Thiết lập Docker Compose chạy Redis & MinIO cục bộ
-- [x] **1.2 Định nghĩa gRPC**
-    - [x] Viết đặc tả gRPC Protobuf tại `proto/image_generation.proto`
-    - [x] Viết script tự động biên dịch `scripts/generate_proto.sh`
-    - [x] Biên dịch gRPC Python code thành công
-- [x] **1.3 Cấu hình Tập trung (Centralized Config)**
-    - [x] Định nghĩa `src/config/settings.py` sử dụng `Pydantic Settings`
-    - [x] Chuyển đổi toàn bộ `os.getenv` trong mã nguồn sang sử dụng `settings` mới
-    - [x] Tạo file `.env.example` làm mẫu cấu hình
+- [x] **1.2 Định nghĩa gRPC** (`proto/image_generation.proto`)
+- [x] **1.3 Cấu hình tập trung** (`settings.py`, `IMAGE_AI_*`)
 - [x] **1.4 Production config discipline**
-    - [x] Tách rõ DEV/PROD bằng biến môi trường (ví dụ: prefix `IMAGE_AI_...`)
-    - [x] Bổ sung setting cho: `PRESIGNED_TTL_SECONDS`, `REDIS_CACHE_TTL_SECONDS`, `CELERY_TASK_TIME_LIMIT`, `MAX_STEPS`, `MAX_WIDTH/HEIGHT`
-    - [x] Pin version các thư viện quan trọng để tránh vỡ môi trường (diffusers/torch không khớp)
 - [ ] **1.5 Model artifact quản lý**
-    - [ ] Xác định model id(s), cách tải model (local path vs remote hub) và hành vi khi offline
-    - [ ] Nếu dùng LoRA: quy ước nơi lưu cache weights (RAM/disk) để giảm download lặp
+    - [ ] Document profile model: `sd-turbo` (Mac dev), `dreamshaper-xl-v2-turbo` + LoRA (Cloud chất lượng)
+    - [ ] Cache HuggingFace tại `MODEL_CACHE_DIR`; hành vi offline
+    - [ ] Script kiểm tra worker đang chạy model nào (log / health endpoint)
 
 ---
 
-## Phase 2: Core AI & Image Processing Components
-- [x] **2.1 Stable Diffusion Pipeline**
-    - [x] Triển khai `src/core/pipeline_runner.py` nạp model SDXL Turbo
-    - [x] Hỗ trợ tự động chuyển thiết bị (CUDA / Apple Silicon MPS / CPU)
-    - [x] Áp dụng VAE Slicing và Tiling để tối ưu bộ nhớ
-- [x] **2.2 Model warmup & singleton pipeline per worker**
-    - [x] Đảm bảo pipeline được khởi tạo **1 lần khi worker start**, không khởi tạo lại cho mỗi task
-    - [x] (Optional) warmup một lần inference cực nhẹ để “mở khóa” kernels trước khi nhận request thật
-    - [x] Gắn warmup vào lifecycle Celery worker (ví dụ signal hoặc init global)
-- [x] **2.3 VRAM & Memory Management**
-    - [x] Triển khai `src/core/vram_manager.py` dọn dẹp cache sau mỗi lần sinh ảnh
-    - [x] Quản lý khóa Lock tuần tự hóa tác vụ trên GPU
+## Phase 2: Core AI & Image Processing
+
+### 2A — Tốc độ & chất lượng panel đơn (Giai đoạn A — Mac)
+
+- [x] **2.1 Stable Diffusion Pipeline** (`pipeline_runner.py`)
+- [x] **2.2 Warmup & singleton pipeline**
+- [x] **2.3 VRAM & memory management**
 - [x] **2.4 VRAM cleanup on cancel/timeout**
-    - [x] Bảo đảm `vram_manager.clear_cache()` chạy trong mọi nhánh: SUCCESS/FAILED/CANCELLED/timeout/revoke
-    - [x] Xử lý trường hợp task bị terminate giữa chừng: hạn chế “kẹt” VRAM (document hạn chế + cách mitigations)
-- [ ] **2.5 Dynamic LoRA Loader**
-    - [ ] Hoàn thiện `src/core/lora_loader.py` để nạp/hủy LoRA thực từ diffusers (bật/tắt adapter đúng cách)
-    - [ ] Thiết kế cơ chế “LoRA per request”: mỗi task có adapter name riêng để tránh xung đột request song song
-    - [ ] Tích hợp tải LoRA từ MinIO (nếu lora là artifact được lưu ở object storage)
-    - [ ] Cache LoRA weights (tránh tải lại cho mỗi task) + policy TTL/LRU nếu bộ nhớ hạn chế
-- [ ] **2.6 Content Safety Checker (NSFW thực)**
-    - [ ] Nâng cấp `src/core/safety_checker.py` từ giả lập thành check thực
-        - [ ] Gợi ý công nghệ (chọn 1 để luận văn gọn):
-            - [ ] Dùng safety checker tích hợp trong `diffusers` (nếu phù hợp model) hoặc
-            - [ ] Dùng mô hình CLIP-based safety checker (nhanh, nhẹ cho thesis), hoặc
-            - [ ] Dùng `nsfw-detector` (nếu ổn định với phiên bản môi trường)
-    - [ ] Safety policy rõ ràng: nếu NSFW -> trả status `FAILED`/`BLOCKED` (nếu không đổi proto thì map vào `FAILED` + `error_message`)
-    - [ ] Log lý do chặn (an toàn cho luận văn) và đảm bảo vẫn dọn VRAM
-- [x] **2.7 Pillow Post-Processing (Hậu kỳ chèn thoại)**
-    - [x] Triển khai thuật toán tự động bẻ chữ xuống dòng (`wrap_text`) dựa trên kích thước font chữ thực tế
-    - [x] Vẽ viền đen bao quanh tranh truyện tranh
-    - [x] Tạo bong bóng thoại (Speech bubble) bo tròn có màu trắng đục (Alpha Channel) ở đáy ảnh
-    - [x] Căn giữa chữ và render Tiếng Việt Unicode sắc nét
-- [ ] **2.8 Comic layout robustness**
-    - [ ] Cache font objects (tránh load font liên tục)
-    - [ ] Chuẩn hóa font fallback khi font không tồn tại
-    - [ ] Giới hạn độ dài caption và fallback bố cục (tránh tràn layout)
-- [x] **2.9 Cache correctness (hash key phải bao phủ mọi tham số ảnh hưởng output)**
-    - [x] Bổ sung các tham số vào hash:
-        - [x] `steps`
-        - [x] `model_id` (và variant nếu có)
-        - [x] LoRA id/name (nếu có)
-        - [x] Các tham số pipeline ảnh hưởng output (guidance_scale, format nếu ảnh hưởng)
-    - [x] Chuẩn hóa prompt đầu vào (trim, collapse whitespace, normalize newline) để giảm “cache miss giả”
+- [x] **2.9 Cache correctness** (hash v5: prompt, seed, caption, size, steps, model, guidance, lora, format)
 - [ ] **2.10 Determinism & seed policy**
-    - [ ] Nếu `seed=-1`: sinh seed ngẫu nhiên và **lưu seed thực** vào log/task_result để tái lập
-    - [ ] Dùng `torch.Generator` theo device đúng cách để seed có ý nghĩa
-- [ ] **2.11 Character Consistency (Tính nhất quán nhân vật)**
-    - [ ] Tích hợp IP-Adapter hoặc ControlNet Reference-Only vào pipeline SDXL Turbo
-    - [ ] Đọc ảnh tham chiếu từ `reference_image_url` được truyền từ gRPC Request
-    - [ ] Cache đặc trưng nhân vật (feature embeddings) để tránh tính toán lại
-- [ ] **2.12 Dynamic & Advanced Speech Bubbles (Khung thoại động)**
-    - [ ] Triển khai parse danh sách `speech_bubbles` từ gRPC Request (thay cho `caption_text` cố định)
-    - [ ] Cải tiến Pillow vẽ khung thoại ở tọa độ động `(x_pos, y_pos)` với nhiều style (SPEECH, THOUGHT, SCREAM)
-- [ ] **2.13 AI Image Upscaling (Siêu độ phân giải)**
-    - [ ] Tích hợp mô hình Real-ESRGAN hoặc thuật toán nội suy chất lượng cao để phóng to ảnh lên 2K/4K
-    - [ ] Cho phép bật/tắt upscaling theo config hoặc gRPC parameter để tiết kiệm GPU
-- [ ] **2.14 Pre-GPU Text Moderation (Chặn từ khóa NSFW)**
-    - [ ] Thực hiện kiểm tra, lọc từ khóa nhạy cảm trên `prompt` đầu vào ngay tại gRPC Server
-    - [ ] Từ chối xử lý sớm các prompt vi phạm chính sách trước khi đưa vào Celery/GPU queue
-- [ ] **2.15 Page Panel Layout Assembler (Ghép trang truyện)**
-    - [ ] Triển khai module ghép nhiều panel thành một trang dọc (Webtoon style) hoặc trang lưới (Manga style)
-    - [ ] Vẽ viền ngăn cách (panel borders) giữa các hình ảnh thành viên trong trang
+    - [x] `seed=-1` sinh ngẫu nhiên trong worker
+    - [ ] Trả `seed` thực trong `GetTaskStatus` response (proto mở rộng nếu cần)
+- [ ] **2.10b Mac performance profiles** *(mới)*
+    - [ ] Profile `fast`: sd-turbo, 512×512, 4 steps, LoRA off, offload off
+    - [ ] Profile `quality`: SDXL + LoRA — **chỉ dùng trên GPU cloud**, không kỳ vọng nhanh trên Mac
+    - [ ] Document: `MPS_DECODE_ON_CPU` + `steps=4` — không tăng steps để “đẹp hơn” trên Mac (chậm tuyến tính)
+    - [ ] **Restart worker sau đổi `.env`** — ghi vào Runbook
+
+### 2B — Nhất quán nhân vật (Giai đoạn B — bắt buộc cho 4 khung)
+
+- [ ] **2.11 Character Consistency** — **ƯU TIÊN CAO**
+    - [ ] Thiết kế `CharacterReference` trong proto: `character_id`, `reference_image_url`, `description`
+    - [ ] Panel 1: sinh từ text; lưu ảnh panel 1 làm reference cho panel 2–4
+    - [ ] Tích hợp **IP-Adapter** (hoặc InstantID) vào pipeline — đọc `reference_image_url`
+    - [ ] Cache embedding theo `character_id` trong Redis (TTL) để không tính lại mỗi panel
+    - [ ] Prompt template: giữ `character_id` + mô tả cố định xuyên suốt 4 panel
+    - [ ] *Mac:* chấp nhận chậm hơn; *Cloud:* bật IP-Adapter đầy đủ
+
+### 2C — Thoại & layout truyện (Giai đoạn B)
+
+- [x] **2.7 Pillow caption cơ bản** (1 bubble đáy, `caption_text`)
+- [~] **2.8 Comic layout robustness** *(một phần)*
+    - [x] Font cache (`@lru_cache` trong `image_processing.py`)
+    - [ ] Font fallback chuẩn hóa cross-platform (Mac/Linux/Docker)
+    - [ ] Giới hạn độ dài + ellipsis khi tràn bubble
+- [ ] **2.12 Dynamic Speech Bubbles** — **ƯU TIÊN CAO**
+    - [ ] Mở rộng proto `SpeechBubble`: thêm `speaker_id`, `speaker_name` (hiển thị optional)
+    - [ ] Parse `repeated speech_bubbles` trong gRPC → worker (thay/thêm `caption_text`)
+    - [ ] Vẽ bubble tại `(x_pos, y_pos)` — tọa độ normalized 0..1
+    - [ ] Style: `SPEECH` (oval), `THOUGHT` (cloud), `SCREAM` (spiky)
+    - [ ] Tránh chồng bubble: collision detection đơn giản
+    - [ ] Hash cache key bao gồm `speech_bubbles` JSON (không chỉ `caption_text`)
+
+- [ ] **2.15 Page Panel Layout Assembler (2×2)** — **ƯU TIÊN CAO**
+    - [ ] API mới: `GenerateComicPageAsync` (hoặc orchestrator gọi 4 panel rồi ghép)
+    - [ ] Module `page_assembler.py`: ghép 4 panel → lưới 2×2 + gutter + viền trang
+    - [ ] Kích thước panel đề xuất: 512×512 → trang ~1080×1080 (+ gutter)
+    - [ ] Upload trang hoàn chỉnh lên MinIO; cache key cấp **page** (4 panel + layout)
+
+- [ ] **2.16 Comic Page Orchestration** *(mới)*
+    - [ ] Celery task `generate_comic_page_task`: 4 panel tuần tự (Mac) / song song (Cloud multi-GPU sau)
+    - [ ] Panel 1 → lưu reference URL → panel 2–4 dùng IP-Adapter
+    - [ ] Mỗi panel nhận `speech_bubbles[]` riêng theo nhân vật
+    - [ ] Trả progress: `panel 1/4`, `2/4`, … qua task meta hoặc gRPC stream (optional)
+
+### 2D — Chất lượng hình (không nhòe)
+
+- [ ] **2.13 Upscaling** — **CHỈ bật trên GPU cloud**, tắt mặc định Mac
+    - [ ] Real-ESRGAN 2× sau inference (optional flag)
+    - [ ] Hoặc: sinh 768×768 trên cloud thay vì upscale 512
+- [~] **2.5 LoRA**
+    - [x] Load/unload cơ bản, format validation
+    - [ ] LoRA SD 1.x cho sd-turbo (khác EldritchComicsXL chỉ SDXL)
+    - [ ] LoRA per-request + cache adapter
+    - [ ] Tải LoRA từ MinIO
+    - [ ] *Cloud only:* EldritchComicsXL + dreamshaper-xl cho style comic đẹp nhất
+
+- [~] **2.6 Content Safety**
+    - [x] Classifier thật (`Falconsai/nsfw_image_detection`)
+    - [ ] Benchmark độ chính xác; map `BLOCKED` trong proto (optional)
+    - [ ] Cho phép tắt qua env khi dev Mac (đã có implicit fallback)
+
+- [ ] **2.14 Pre-GPU text moderation** (optional)
 
 ---
 
 ## Phase 3: Storage & Caching
-- [x] **3.1 Object Storage (MinIO)**
-    - [x] Triển khai `src/storage/minio_client.py` tự tạo bucket
-    - [x] Upload trực tiếp ảnh dạng byte-stream từ RAM (không ghi xuống đĩa cứng)
-    - [x] Sinh link bảo mật có thời hạn (Presigned URL)
-- [ ] **3.2 MinIO reliability**
-    - [ ] Retry với backoff cho lỗi mạng (timeout, 5xx)
-    - [ ] Đặt timeout cho network calls
-    - [ ] Chuẩn hóa format upload (JPEG/PNG/WEBP) và content_type
-    - [ ] Mệnh danh object theo quy ước chống trùng (nếu cache hit thì map đúng key)
-- [x] **3.3 Caching (Redis)**
-    - [x] Triển khai `src/cache/redis_cache.py` băm chuỗi tham số (MD5) thành Hash Key
-    - [x] Lưu Cache Hit liên kết ảnh MinIO để tránh chạy lại GPU cho prompt trùng lặp
-    - [x] Thiết lập TTL (Time-To-Live) tự động xóa cache sau 14 ngày
-- [x] **3.4 Thundering herd protection (cache miss đồng thời)**
-    - [x] Khi cache miss: dùng Redis lock theo `hash_key` (SET NX + expire) để chỉ **một** task chạy inference
-    - [x] Các request còn lại chờ/hoặc poll đến khi key được set (tránh 2-3 GPU job trùng prompt)
-- [x] **3.5 Cache versioning**
-    - [x] Tạo prefix version cho cache (ví dụ `img_cache_v2:`) để khi thay đổi hash logic không bị hit sai
-- [ ] **3.6 Celery result vs Redis cache thống nhất**
-    - [ ] Đảm bảo status `PENDING/PROCESSING/SUCCESS/FAILED/CANCELLED` được ánh xạ nhất quán
-    - [ ] Nếu task bị revoke: Redis cache không được set “thành công” khi ảnh chưa tồn tại
+
+- [x] **3.1 MinIO upload RAM + presigned URL**
+- [x] **3.3 Redis cache MD5**
+- [x] **3.4 Thundering herd lock**
+- [x] **3.5 Cache versioning** (v5)
+- [ ] **3.2 MinIO reliability** (retry, timeout)
+- [ ] **3.6 Celery result vs cache thống nhất**
+- [ ] **3.7 Page-level cache** *(mới)*: cache cả trang 2×2, không chỉ từng panel
 
 ---
 
-## Phase 4: gRPC Service & Celery Queue
-- [x] **4.1 gRPC Servicer**
-    - [x] Triển khai `GenerateImageAsync` đẩy task vào hàng đợi và phản hồi tức thì Task ID
-    - [x] Triển khai `GetTaskStatus` lấy trạng thái từ Celery backend
-    - [x] Triển khai `CheckHealth` kiểm tra trạng thái sức khỏe gRPC
-- [x] **4.2 gRPC Cancel Task (baseline đã có)**
-    - [x] Triển khai hàm `CancelTask` trong `src/service/image_service.py` bằng `celery_app.control.revoke(..., terminate=True)`
-    - [x] Hardening production:
-        - [x] Hỗ trợ “soft revoke” trước khi terminate (giảm nguy cơ dừng giữa chừng)
-        - [x] Cập nhật trạng thái task về `CANCELLED` rõ ràng (tránh để task treo)
-        - [x] Đảm bảo cleanup VRAM chạy kể cả khi bị revoke/terminate
-- [x] **4.3 Input validation & OOM prevention**
-    - [x] Validate `width/height` nằm trong giới hạn cho thiết bị mục tiêu
-    - [x] Validate `num_inference_steps` (ví dụ 1..20) để tránh request quá nặng
-    - [x] Validate `caption_text` (giới hạn độ dài ký tự)
-    - [x] Nếu invalid -> trả gRPC error code phù hợp và không push job vào queue
-- [x] **4.4 Tránh lỗi Multi-processing trên macOS (SIGSEGV)**
-    - [x] Chạy Celery Worker ở chế độ đơn tiến trình `--pool=solo` khi dev trên Mac
-- [x] **4.5 Sửa lỗi gRPC Backend**
-    - [x] Truyền đối tượng `celery_app` vào `AsyncResult` trong gRPC để đọc trạng thái chính xác
-- [ ] **4.6 Worker reliability (timeouts/retries/circuit breaking)**
-    - [x] `task_time_limit` / `soft_time_limit` để tránh task chết ngầm
-    - [ ] Retry chính sách cho lỗi MinIO/Redis (network) với số lần retry giới hạn
-    - [ ] Không retry khi gặp OOM (hoặc retry với steps nhỏ hơn) để tránh spam GPU
-    - [ ] Bổ sung vòng bắt exception có taxonomy rõ ràng để trả `error_message` dễ hiểu
-- [ ] **4.7 Backpressure & rate limiting**
-    - [ ] Giới hạn số request chờ bằng queue config (CELERY/QoS)
-    - [ ] Rate limit theo user (nếu có auth) hoặc theo endpoint chung
-- [ ] **4.8 Correlation id & audit log**
-    - [ ] Thêm correlation id (có thể dùng `task_id`) vào log gRPC + log Celery để trace end-to-end
+## Phase 4: gRPC & Celery
+
+- [x] **4.1–4.5** Async generate, status, cancel, validation, macOS solo pool
+- [ ] **4.2b Cancel race fix** *(mới)*: revoke task đang PROCESSING; không revoke sau SUCCESS
+- [ ] **4.6 Worker reliability** (retry network, OOM taxonomy)
+- [ ] **4.7 Backpressure / rate limit**
+- [ ] **4.8 Correlation id trong log**
+- [ ] **4.9 GenerateComicPage gRPC** *(mới)* — endpoint batch 4 panel + page assembly
 
 ---
 
-## Phase 5: Monitoring & Monitoring API
-- [x] **5.1 Prometheus Metrics (export thật)**
-    - [x] Thay `/metrics` thành Prometheus exporter bằng `prometheus_client`
-    - [x] Metrics tối thiểu nên có:
-        - [x] `image_requests_total{status=...}`
-        - [x] `task_duration_seconds_bucket` (Histogram) theo `cached`/`success`
-        - [ ] `cache_hit_total` và `cache_hit_ratio` (nếu tính được)
-        - [x] `minio_upload_errors_total`
-        - [x] `safety_blocks_total`
-    - [ ] GPU metrics thực tế:
-        - [ ] Dùng `pynvml` để đọc VRAM/utility (nếu chạy CUDA)
-        - [ ] Nếu chạy MPS/CPU: export placeholder hoặc tách label `device_type`
-    - [ ] (Optional) worker multiprocess mode nếu Celery fork nhiều process
-- [x] **5.2 Health Monitor API**
-    - [x] FastAPI `/healthz` kiểm tra kết nối Redis & MinIO
-    - [x] Mở rộng health:
-        - [x] kiểm tra GPU availability (CUDA/MPS)
-        - [x] kiểm tra pipeline/model artifact sẵn sàng (để tránh “server sống nhưng generate chết”)
-- [ ] **5.3 Tracing (tuỳ chọn cho luận văn)**
-    - [ ] Gợi ý dùng OpenTelemetry + Jaeger/Zipkin nếu muốn chương “observability” thuyết phục hơn
+## Phase 5: Monitoring
+
+- [x] **5.1 Prometheus** (requests, duration, cache hit/miss, safety, active_gpu_tasks)
+- [x] **5.2 `/healthz`**
+- [ ] **5.1b** `cache_hit_ratio` gauge; label `device=mps|cuda`
+- [ ] **5.1c** GPU metrics CUDA (`pynvml`) — Giai đoạn C
+- [ ] **5.3 Tracing** (optional OpenTelemetry)
 
 ---
 
 ## Phase 6: Testing & Documentation
-- [x] **6.1 Client Test Script**
-    - [x] Tạo file test `tests/test_client.py` mô phỏng đầy đủ hành vi gọi API từ Orchestrator
-- [ ] **6.2 Unit Tests & Logic Tests**
-    - [ ] Unit tests cho `wrap_text` (cases: tiếng Việt có dấu, nhiều dòng, biên giới font size)
-    - [ ] Unit tests cho `redis_cache.generate_hash_key` theo schema v2 (bao phủ steps/model/lora)
-    - [ ] Unit tests cho safety checker (mock classifier) để đảm bảo policy fail đúng
-    - [ ] Unit tests cho minio upload flow (mock client) đảm bảo không ghi file cứng
-- [ ] **6.3 Integration Tests (E2E nhẹ)**
-    - [ ] Test “cache hit”: gọi 2 lần cùng prompt -> lần 2 không chạy inference (cần hook/log hoặc mock pipeline)
-    - [ ] Test “cancel”: gửi request rồi cancel ngay -> status `CANCELLED` hoặc `FAILED` vì revoke, và đảm bảo worker không treo
-- [ ] **6.4 Benchmarks (đưa vào luận văn)**
-    - [ ] Inference latency: đo cold-start vs warm-start
-    - [ ] Đo theo các cấu hình steps (vd: 4/8/10) và kích thước ảnh (vd: 512/1024)
-    - [ ] Đo VRAM peak (CUDA) hoặc “ước lượng” theo thiết bị
-    - [ ] Đo hiệu quả cache: cache hit ratio và thời gian tiết kiệm
-- [ ] **6.5 Hướng dẫn sử dụng (Documentation)**
-    - [ ] Viết file `docs/API.md` mô tả các tham số gRPC Request/Response + ví dụ request
-    - [ ] Viết `docs/Runbook.md` (hoặc mục trong `README.md`) gồm: cách chạy dev/prod, cách xem metrics, cách xử lý lỗi
-    - [ ] Hướng dẫn cách cài đặt LoRA tùy chỉnh (quy trình upload LoRA lên MinIO + format/đặt tên)
+
+- [x] **6.1 `test_client.py`**
+- [ ] **6.2 Unit tests** (wrap_text, hash key, safety mock, minio mock)
+- [ ] **6.3 Integration** (cache hit, cancel đúng timing)
+- [~] **6.4 Benchmarks** — **đang làm**
+    - [x] Baseline Mac SDXL+LoRA+offload: **212s/panel** (log 2026-06-06)
+    - [x] Cache hit: **0.01s**
+    - [ ] Sau restart: sd-turbo profile
+    - [ ] 4 panel tuần tự Mac vs 1 page task
+    - [ ] Cloud CUDA cùng prompt (Giai đoạn C)
+- [ ] **6.5 Docs**: `API.md`, `Runbook.md` (nhấn mạnh restart worker)
 
 ---
 
-## Phase 7: Production Deployment
-- [ ] **7.1 Docker Production**
-    - [ ] Tối ưu hóa `Dockerfile` (Multi-stage build, giảm kích thước ảnh)
-    - [ ] Chạy container dưới user không root
-    - [ ] Cấu hình `HEALTHCHECK` cho cả gRPC và worker
-    - [ ] Pin base image + thêm file lock nếu cần
-- [ ] **7.2 GPU runtime & scaling**
-    - [ ] Cấu hình chia sẻ GPU (`nvidia-container-toolkit`) trong `docker-compose.yml`
-    - [ ] Thiết lập `CUDA_VISIBLE_DEVICES`/resource reservation theo từng worker
-    - [ ] (Nếu scale nhiều worker) thiết kế scheduling: tránh 2 worker cùng “giành” GPU nếu concurrency không đủ
-    - [ ] Tùy chọn cân nhắc: thêm hàng đợi theo GPU (nếu có nhiều GPU) để tăng throughput
-- [ ] **7.3 Khởi động hệ thống tự động**
-    - [ ] Setup script hoặc supervisor (hoặc systemd) tự khởi động lại gRPC server & worker khi gặp sự cố
-- [ ] **7.4 CI/CD cho luận văn (tuỳ chọn nhưng nên có)**
-    - [ ] Thêm pipeline chạy `pytest` và lint ở chế độ CPU-only
-    - [ ] Build/test docker image cho CPU mode để đảm bảo reproducible
-    - [ ] (Optional) pip-audit / dependency vulnerability scan
+## Phase 7: GPU Cloud (Giai đoạn C — sau khi Phase B ổn trên Mac)
+
+- [ ] **7.1 Docker production** (multi-stage, non-root, HEALTHCHECK)
+- [ ] **7.2 GPU runtime**
+    - [ ] Bật `nvidia` trong `docker-compose.yml`
+    - [ ] Worker CUDA: sd-turbo (nhanh) hoặc SDXL+LoRA (đẹp) — 2 profile
+    - [ ] Network volume cache model
+- [ ] **7.3 Auto-restart** (supervisor/systemd)
+- [ ] **7.4 CI/CD** (pytest CPU-only, docker build)
 
 ---
 
-## Phase 8: Deliverables để đưa vào luận văn (đề xuất)
-*   1 sơ đồ kiến trúc end-to-end (gRPC -> Celery -> MinIO -> Redis cache).
-*   1 bảng so sánh: cold-start vs warm-start; cache hit vs cache miss.
-*   1 phần “Reliability”: timeout/retry/cancel policy, VRAM cleanup.
-*   1 phần “Safety”: pipeline safety checker + chính sách chặn.
-*   1 phần “Observability”: metrics + log correlation id.
+## Phase 8: Deliverables luận văn
+
+*   Sơ đồ: Orchestrator → gRPC → Celery → 4× Panel → Page Assembler → MinIO.
+*   Bảng benchmark: Mac (A) vs Cloud (C); cache hit; cold vs warm.
+*   Phần **Character Consistency**: IP-Adapter + reference chain panel 1→4.
+*   Phần **UX truyện**: speech bubble đa nhân vật + layout 2×2.
+*   Reliability: cancel, VRAM, timeout, thundering herd.
+*   Safety + Observability.
+
+---
+
+## Thứ tự làm tiếp (đề xuất tuần này)
+
+1. **Restart worker** → xác nhận log in `sd-turbo`, `LoRA disabled`, `offload=false` → đo lại thời gian.
+2. **6.4** Ghi benchmark vào bảng trên.
+3. **2.12** Speech bubbles đa nhân vật (proto đã có).
+4. **2.11** IP-Adapter + reference từ panel 1.
+5. **2.15 + 2.16** Ghép trang 2×2 + task `generate_comic_page`.
+6. **7.2** GPU cloud + benchmark thesis.
+
+---
+
+## Kiến trúc mục tiêu — Trang 2×2
+
+```mermaid
+flowchart TB
+    O[Orchestrator / BE Comic] -->|GenerateComicPage| G[gRPC]
+    G --> Q[Celery Queue]
+    Q --> P1[Panel 1: text only]
+    P1 -->|save ref image| R[Redis char cache]
+    P1 --> P2[Panel 2: IP-Adapter + ref]
+    R --> P2
+    R --> P3[Panel 3]
+    R --> P4[Panel 4]
+    P2 --> B1[Bubbles speaker A/B]
+    P3 --> B2[Bubbles]
+    P4 --> B3[Bubbles]
+    B1 --> A[Page Assembler 2x2]
+    B2 --> A
+    B3 --> A
+    A --> M[MinIO page URL]
+```
+
+**Mục tiêu thời gian (realistic):**
+
+| Môi trường | 4 panel + ghép trang |
+|------------|----------------------|
+| Mac + sd-turbo + IP-Adapter | ~4–8 phút (chấp nhận cho dev) |
+| GPU cloud RTX 4090 | ~1–2.5 phút |
+| Cache hit (cùng trang) | < 5 giây |

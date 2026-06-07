@@ -20,6 +20,9 @@ service ImageGenerationService {
 
   // Giải phóng cache của GPU
   rpc ClearGpuCache (ClearGpuCacheRequest) returns (ClearGpuCacheResponse);
+
+  // Kiểm tra sức khỏe của CPU
+  rpc CheckCpuHealth (CheckCpuHealthRequest) returns (CheckCpuHealthResponse);
 }
 
 
@@ -96,4 +99,15 @@ message SpeechBuble {
   string bubble_type = 2; // SPEECH, THOUGHT, SCREAM
   float x_pos = 3;
   float y_pos = 4;
+}
+
+message CheckCpuHealthRequest{}
+
+message CheckCpuHealthResponse{
+  bool is_healthy = 1;
+  string cpu_name = 2;
+  string cpu_memory_usage = 3;
+  string cpu_memory_free = 4;
+  string cpu_memory_total = 5;
+  string cpu_memory_used = 6;
 }

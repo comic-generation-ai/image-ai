@@ -23,6 +23,18 @@ logger = get_logger(__name__)
 
 @dataclass
 class ImageRequest:
+    """
+    This class is used to request an image from the pipeline.
+    Attributes:
+        prompt: The prompt to use for the image generation.
+        width: The width of the image.
+        height: The height of the image.
+        seed: The seed to use for the image generation.
+        steps: The number of steps to use for the image generation.
+        guidance_scale: The guidance scale to use for the image generation.
+        negative_prompt: The negative prompt to use for the image generation.
+        lora_path: The path to the lora to use for the image generation.
+    """
     prompt: str
     width: int = 1024
     height: int = 1024

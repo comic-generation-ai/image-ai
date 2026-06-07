@@ -46,8 +46,8 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "After school, there was a brilliant sunset"
-        caption = "Sau giờ tan học là hoàng hôn rực rỡ"
+        prompt = "The police is arresting the criminal"
+        caption = "Cảnh sát bắt tên trộm"
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")
