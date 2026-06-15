@@ -16,8 +16,18 @@ mkdir -p "$OUTPUT_DIR"
 # 1. *.py (Mã hóa tin nhắn)
 # 2. *.pyi (Type hint stubs hỗ trợ nhắc lệnh / IDE Autocomplete)
 # 3. *_grpc.py (Các Stub và Servicer cho gRPC)
-echo "Đang biên dịch Protobuf..."
-python3 -m grpc_tools.protoc \
+# Ưu tiên venv của project (grpcio-tools cài trong env/, không phải python3 hệ thống)
+if [[ -x "$PROJECT_ROOT/env/bin/python3" ]]; then
+    PYTHON="$PROJECT_ROOT/env/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    echo " Lỗi: Không tìm thấy python3. Chạy: python3 -m venv env && source env/bin/activate && pip install -r requirements.txt"
+    exit 1
+fi
+
+echo "Đang biên dịch Protobuf (python: $PYTHON)..."
+"$PYTHON" -m grpc_tools.protoc \
     -I"$PROTO_DIR" \
     --python_out="$OUTPUT_DIR" \
     --pyi_out="$OUTPUT_DIR" \

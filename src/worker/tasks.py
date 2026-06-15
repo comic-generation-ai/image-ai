@@ -52,7 +52,7 @@ def on_task_revoked(sender=None, request=None, **kwargs):
 
 @celery_app.task(bind=True, name="worker.tasks.generate_image_task")
 
-def generate_image_task(self, prompt: str, width: int, height: int, seed: int, steps: int, caption_text: str):
+def generate_image_task(self, prompt: str, width: int, height: int, seed: int, steps: int, caption_text: str, style: str = ""):
     """
     Nhiệm vụ Celery chạy ngầm chính:
     Thực hiện điều phối từ A-Z quy trình sinh ảnh và hậu kỳ.
@@ -79,6 +79,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         output_image_format=settings.OUTPUT_IMAGE_FORMAT.lower(),
         jpeg_quality=settings.JPEG_QUALITY,
         png_compress_level=settings.PNG_COMPRESS_LEVEL,
+        style=style,
     )
     
     # Kiểm tra cache trong Redis
@@ -134,6 +135,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
                 height=height,
                 seed=actual_seed,
                 steps=steps,
+                style=style,
             )
         )
         raw_image = response.image

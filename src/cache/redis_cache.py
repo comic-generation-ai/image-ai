@@ -46,6 +46,7 @@ class RedisCacheManager:
         output_image_format: str = "",
         jpeg_quality: int = 0,
         png_compress_level: int = 0,
+        style: str = "",
     ) -> str:
         """
         Tạo mã khóa MD5 từ tất cả các tham số ảnh để kiểm tra trùng lặp prompt đầu vào.
@@ -64,6 +65,7 @@ class RedisCacheManager:
             "output_image_format": output_image_format,
             "jpeg_quality": jpeg_quality,
             "png_compress_level": png_compress_level,
+            "style": style or "",
         }
         raw_string = json.dumps(payload, ensure_ascii=True, sort_keys=True)
         return hashlib.md5(raw_string.encode("utf-8")).hexdigest()

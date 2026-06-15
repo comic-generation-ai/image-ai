@@ -42,6 +42,7 @@ message GenerateImageRequest {
   int32 num_inference_steps = 6;  // Số bước khử nhiễu (4-8 cho SDXL Turbo)
   string caption_text = 7;        // Văn bản lời thoại tiếng Việt chèn vào khung truyện (legacy)
   repeated SpeechBuble speech_bubbles = 8; // Danh sách bong bóng thoại động
+  string style = 9;               // Style của ảnh (storybook, anime, manga, retro, american_comic)
 }
 
 message GenerateImageResponse {

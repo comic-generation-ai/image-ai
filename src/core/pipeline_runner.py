@@ -43,6 +43,7 @@ class ImageRequest:
     guidance_scale: float | None = None
     negative_prompt: str = ""
     lora_path: str | None = None
+    style: str = ""
 
 
 @dataclass
@@ -51,7 +52,46 @@ class ImageResponse:
     seed: int
 
 
+STYLE_PRESETS = {
+    "storybook": {
+        "suffix": "children storybook illustration, soft watercolor, cute chibi, pastel colors, clean lineart, comic panel",
+        "negative": "ugly, blurry, low quality, photorealistic, 3d render, dark, scary, deformed hands, bad anatomy, text, watermark, logo, nsfw",
+    },
+    "anime": {
+        "suffix": "anime key visual style, highly detailed digital illustration, vibrant colors, clean lineart, anime background, comic book panel",
+        "negative": "monochrome, black and white, sketch, draft, ugly, blurry, low quality, photorealistic, 3d render, deformed hands, bad anatomy, text, watermark, logo, nsfw",
+    },
+    "manga": {
+        "suffix": "manga art style, black and white, screen tones, hand-drawn ink sketch, highly detailed lineart, dramatic shading, comic book panel",
+        "negative": "colored, vibrant colors, painting, watercolor, ugly, blurry, low quality, photorealistic, 3d render, deformed hands, bad anatomy, text, watermark, logo, nsfw",
+    },
+    "retro": {
+        "suffix": "retro classic comic book style, pop art, dot shading halftone print, vintage colors, bold ink outlines, 1980s print quality",
+        "negative": "modern digital painting, smooth gradients, watercolor, anime, manga, photorealistic, 3d render, ugly, blurry, low quality, text, watermark, logo, nsfw",
+    },
+    "american_comic": {
+        "suffix": "classic american comic book style, dramatic lighting, bold lines, rich colors, superhero comic art, action panel",
+        "negative": "anime, manga, watercolor, soft illustration, photorealistic, 3d render, ugly, blurry, low quality, text, watermark, logo, nsfw",
+    }
+}
+
+
 class PipelineRunner:
+    def _parse_style_from_prompt(self, prompt: str) -> tuple[str, str]:
+        """
+        Phân tích cú pháp prompt để tìm thẻ [style:xxx].
+        Trả về (prompt_clean, style_name).
+        Ví dụ: "[style:anime] a cat" -> ("a cat", "anime")
+        """
+        prompt = (prompt or "").strip()
+        if prompt.startswith("[style:"):
+            end_idx = prompt.find("]")
+            if end_idx != -1:
+                style_name = prompt[7:end_idx].strip().lower()
+                clean_prompt = prompt[end_idx + 1:].strip()
+                return clean_prompt, style_name
+        return prompt, ""
+
     def __init__(self):
         self.settings = get_settings()
 
@@ -157,19 +197,27 @@ class PipelineRunner:
             strict_compatibility=self.settings.LORA_STRICT_COMPATIBILITY,
         )
 
-    def _build_prompt(self, prompt: str) -> str:
+    def _build_prompt(self, prompt: str, style: str = "") -> str:
         prompt = (prompt or "").strip()
+        clean_prompt, parsed_style = self._parse_style_from_prompt(prompt)
+        style_to_use = (style or parsed_style or "").strip().lower()
+
         trigger_words = self.settings.LORA_TRIGGER_WORDS.strip()
         if trigger_words:
-            prompt = f"{trigger_words}, {prompt}" if prompt else trigger_words
+            clean_prompt = f"{trigger_words}, {clean_prompt}" if clean_prompt else trigger_words
         if not self.settings.COMIC_STYLE_ENABLED:
-            return self._truncate_for_clip(prompt)
-        style_suffix = self.settings.COMIC_STYLE_PROMPT_SUFFIX.strip()
+            return self._truncate_for_clip(clean_prompt)
+            
+        if style_to_use in STYLE_PRESETS:
+            style_suffix = STYLE_PRESETS[style_to_use]["suffix"]
+        else:
+            style_suffix = self.settings.COMIC_STYLE_PROMPT_SUFFIX.strip()
+            
         if not style_suffix:
-            return self._truncate_for_clip(prompt)
-        if not prompt:
+            return self._truncate_for_clip(clean_prompt)
+        if not clean_prompt:
             return self._truncate_for_clip(style_suffix)
-        return self._truncate_for_clip(f"{prompt}, {style_suffix}")
+        return self._truncate_for_clip(f"{clean_prompt}, {style_suffix}")
 
     def _truncate_for_clip(self, text: str) -> str:
         """CLIP giới hạn ~77 token; cắt sớm để tránh truncate làm hỏng prompt."""
@@ -183,10 +231,16 @@ class PipelineRunner:
         )
         return trimmed
 
-    def _build_negative_prompt(self, negative_prompt: str) -> str:
+    def _build_negative_prompt(self, negative_prompt: str, style: str = "") -> str:
+        style_to_use = (style or "").strip().lower()
+        if style_to_use in STYLE_PRESETS:
+            default_neg = STYLE_PRESETS[style_to_use]["negative"]
+        else:
+            default_neg = self.settings.DEFAULT_NEGATIVE_PROMPT
+
         parts = [
             value.strip()
-            for value in [negative_prompt, self.settings.DEFAULT_NEGATIVE_PROMPT]
+            for value in [negative_prompt, default_neg]
             if value and value.strip()
         ]
         return ", ".join(dict.fromkeys(parts))
@@ -421,8 +475,8 @@ class PipelineRunner:
         if width % 8 != 0 or height % 8 != 0:
             raise ValueError("Width/Height must be divisible by 8")
 
-        if steps < 1 or steps > 20:
-            raise ValueError("Steps must be between 1 and 20")
+        if steps < self.settings.MIN_STEPS or steps > self.settings.MAX_STEPS:
+            raise ValueError(f"Steps must be between {self.settings.MIN_STEPS} and {self.settings.MAX_STEPS}")
 
     def generate(self, request: ImageRequest) -> ImageResponse:
 
@@ -450,15 +504,20 @@ class PipelineRunner:
                         else self._default_guidance_scale()
                     )
 
+                    # Determine style
+                    clean_prompt, parsed_style = self._parse_style_from_prompt(request.prompt)
+                    style_to_use = (request.style or parsed_style or "").strip().lower()
+
                     logger.info(
                         f"Generating image | "
                         f"Seed={seed} | "
                         f"Steps={request.steps} | "
-                        f"Guidance={guidance_scale}"
+                        f"Guidance={guidance_scale} | "
+                        f"Style={style_to_use or 'default'}"
                     )
-                    prompt = self._build_prompt(request.prompt)
+                    prompt = self._build_prompt(request.prompt, style_to_use)
                     negative_prompt = self._build_negative_prompt(
-                        request.negative_prompt
+                        request.negative_prompt, style_to_use
                     )
 
                     image = self._run_inference(

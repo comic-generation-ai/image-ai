@@ -32,7 +32,23 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
         try:
             width = request.width if request.width > 0 else settings.DEFAULT_WIDTH
             height = request.height if request.height > 0 else settings.DEFAULT_HEIGHT
-            steps = request.num_inference_steps if request.num_inference_steps > 0 else settings.DEFAULT_STEPS
+            
+            # Tự động tối ưu số bước lặp (steps) cho các model non-turbo (như dreamshaper-8)
+            # Nếu client yêu cầu số steps quá nhỏ (ví dụ < 10) mà model hiện tại không phải turbo,
+            # ta sẽ tự động ghi đè bằng giá trị cấu hình DEFAULT_STEPS để đảm bảo chất lượng ảnh không bị xấu/nhiễu.
+            is_turbo = "turbo" in settings.MODEL_ID.lower()
+            requested_steps = request.num_inference_steps
+            if requested_steps > 0:
+                if not is_turbo and requested_steps < 10:
+                    logger.warning(
+                        f"Model {settings.MODEL_ID} không phải là Turbo nhưng nhận yêu cầu steps={requested_steps} quá thấp. "
+                        f"Tự động điều chỉnh lên default steps={settings.DEFAULT_STEPS} để đảm bảo chất lượng."
+                    )
+                    steps = settings.DEFAULT_STEPS
+                else:
+                    steps = requested_steps
+            else:
+                steps = settings.DEFAULT_STEPS
 
             if width <= 0 or width > settings.MAX_WIDTH or width % 8 != 0:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -51,6 +67,8 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
                 context.set_details(f"caption_text vượt quá {settings.CAPTION_MAX_LENGTH} ký tự")
                 return image_generation_pb2.GenerateImageResponse()
 
+            style = (request.style or "").strip()
+
             # Đẩy công việc vào Celery Worker xử lý bất đồng bộ
             # Concurrency=1 trên Worker đảm bảo GPU xử lý tuần tự không bị sập
             async_result = generate_image_task.delay(
@@ -59,7 +77,8 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
                 height=height,
                 seed=request.seed,
                 steps=steps,
-                caption_text=request.caption_text
+                caption_text=request.caption_text,
+                style=style
             )
             
             logger.info(f"Đã đẩy task vào queue hàng đợi thành công | Celery Task ID: {async_result.id}")

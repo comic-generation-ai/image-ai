@@ -46,8 +46,8 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "The police is arresting the criminal"
-        caption = "Cảnh sát bắt tên trộm"
+        prompt = "The rabbit is eating carrot in the garden."
+        caption = "Chú thỏ đang ăn cà rốt trong vườn."
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")
@@ -57,8 +57,9 @@ def test_grpc_service():
             width=512,          # Dùng kích thước nhỏ để sinh ảnh nhanh khi test
             height=512,
             seed=42,
-            num_inference_steps=4,
-            caption_text=caption
+            num_inference_steps=15,
+            caption_text=caption,
+            style="retro"       # Sử dụng trường style mới trong gRPC
         )
         
         resp = stub.GenerateImageAsync(req)
@@ -102,11 +103,11 @@ def test_cancel_task():
         # Gửi request sinh ảnh
         print("Đang gửi yêu cầu sinh ảnh để hủy...")
         req = image_generation_pb2.GenerateImageRequest(
-            prompt="A cat sitting on a futuristic motorcycle in a cyberpunk cityscape at night" ,
+            prompt="[style:retro] A cool cat sitting on a futuristic motorcycle in cyberpunk city at night" ,
             width=512,
             height=512,
             seed=12,
-            num_inference_steps=4,
+            num_inference_steps=15,
             caption_text="Một con mèo ngồi trên chiếc xe máy tương lai trong cảnh thành phố cyberpunk về đêm"
         )
         resp = stub.GenerateImageAsync(req)
