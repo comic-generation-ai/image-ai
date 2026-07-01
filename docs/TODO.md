@@ -24,7 +24,7 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 |---------------------------|-------------------|-----------|---------|
 | SDXL Turbo + LoRA + MPS sequential offload | ~192s (~48s/step) | **212s** | Worker start 09:54 — **chưa áp dụng `.env` mới** |
 | Cache hit (cùng prompt/seed) | 0s GPU | **0.01s** | Redis cache hoạt động đúng |
-| `.env` hiện tại (chưa restart worker) | sd-turbo, LoRA off, offload off | *chưa đo* | Cần restart worker rồi chạy lại `test_client.py` |
+| `.env` hiện tại | **dreamshaper-8** (SD 1.5), 512×512, 15 steps, CFG=7.0, LoRA off, offload off | *chưa đo* | Khác hẳn model đã benchmark ở trên (SDXL Turbo) — cần chạy `test_client.py` để đo baseline mới |
 
 ---
 
@@ -34,6 +34,13 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 *   **Pipeline**: hỗ trợ SD 1.x Turbo + SDXL Turbo; CUDA / MPS / CPU; warmup singleton.
 *   **LoRA**: loader cơ bản có (`lora_loader.py`); chưa LoRA per-request / MinIO artifact.
 *   **Safety**: `Falconsai/nsfw_image_detection` đã tích hợp (TODO doc cũ chưa cập nhật).
+*   **Style**: 5 preset dựng sẵn (`storybook`, `anime`, `manga`, `retro`, `american_comic`) + tag
+    `[style:xxx]` parse ngay trong prompt (`pipeline_runner.py`) — **đã xong**, chưa có trong
+    roadmap gốc bên dưới.
+*   **Output validation**: chặn ảnh đen/hỏng (`OUTPUT_MIN_MEAN_BRIGHTNESS`) trước khi upload MinIO
+    — **đã xong** (`utils/image_validation.py`).
+*   **GPU/CPU health**: `CheckGpuHealth`, `CheckCpuHealth`, `ClearGpuCache` đã implement trong
+    `image_service.py` — **đã xong**, chưa có trong roadmap gốc bên dưới.
 *   **Caption**: 1 bubble cố định ở đáy ảnh (`caption_text`); proto có `speech_bubbles` nhưng **chưa implement**.
 *   **Trang 2×2 / nhất quán nhân vật**: **chưa có** — cần Phase B.
 *   **Cancel**: có; `test_cancel_task` gửi revoke sau khi task đã chạy xong → revoke muộn (cần hardening 4.2).
@@ -42,7 +49,7 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 
 ## Tiêu chí “DONE” production-ready
 
-*   Cache key đúng mọi tham số ảnh hưởng output (đã có v5).
+*   Cache key đúng mọi tham số ảnh hưởng output (`.env` hiện tại đặt `IMAGE_AI_CACHE_KEY_VERSION=v5`; mặc định code nếu không set qua `.env` là `v3`).
 *   Thundering herd lock khi cache miss đồng thời (đã có).
 *   Safety checker + policy FAILED rõ ràng.
 *   Metrics + benchmark reproducible (Mac + Cloud).
@@ -58,7 +65,8 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 - [x] **1.3 Cấu hình tập trung** (`settings.py`, `IMAGE_AI_*`)
 - [x] **1.4 Production config discipline**
 - [ ] **1.5 Model artifact quản lý**
-    - [ ] Document profile model: `sd-turbo` (Mac dev), `dreamshaper-xl-v2-turbo` + LoRA (Cloud chất lượng)
+    - [ ] Document profile model: **hiện tại `.env` dùng `dreamshaper-8`** (SD 1.5, Mac dev) —
+        khác kế hoạch gốc `sd-turbo`; `dreamshaper-xl-v2-turbo` + LoRA vẫn là plan cho Cloud chất lượng
     - [ ] Cache HuggingFace tại `MODEL_CACHE_DIR`; hành vi offline
     - [ ] Script kiểm tra worker đang chạy model nào (log / health endpoint)
 
@@ -72,11 +80,14 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 - [x] **2.2 Warmup & singleton pipeline**
 - [x] **2.3 VRAM & memory management**
 - [x] **2.4 VRAM cleanup on cancel/timeout**
-- [x] **2.9 Cache correctness** (hash v5: prompt, seed, caption, size, steps, model, guidance, lora, format)
+- [x] **2.9 Cache correctness** (hash version qua `.env`, hiện tại `v5` — mặc định code `v3`: prompt, seed, caption, size, steps, model, guidance, lora, format, style)
 - [ ] **2.10 Determinism & seed policy**
     - [x] `seed=-1` sinh ngẫu nhiên trong worker
     - [ ] Trả `seed` thực trong `GetTaskStatus` response (proto mở rộng nếu cần)
 - [ ] **2.10b Mac performance profiles** *(mới)*
+    > **Cập nhật thực tế:** `.env` hiện tại KHÔNG dùng `sd-turbo` như profile `fast` dự kiến bên
+    > dưới — đang chạy `dreamshaper-8` (SD 1.5, non-turbo) 512×512/15 steps/CFG=7.0, LoRA off,
+    > offload off. Cần benchmark lại theo profile này (bảng benchmark dưới đây đã cũ, đo trên SDXL Turbo).
     - [ ] Profile `fast`: sd-turbo, 512×512, 4 steps, LoRA off, offload off
     - [ ] Profile `quality`: SDXL + LoRA — **chỉ dùng trên GPU cloud**, không kỳ vọng nhanh trên Mac
     - [ ] Document: `MPS_DECODE_ON_CPU` + `steps=4` — không tăng steps để “đẹp hơn” trên Mac (chậm tuyến tính)
@@ -160,6 +171,7 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 - [ ] **4.7 Backpressure / rate limit**
 - [ ] **4.8 Correlation id trong log**
 - [ ] **4.9 GenerateComicPage gRPC** *(mới)* — endpoint batch 4 panel + page assembly
+- [x] **4.10 GPU/CPU health & cache clear RPC** (`CheckGpuHealth`, `CheckCpuHealth`, `ClearGpuCache` — đã implement)
 
 ---
 
@@ -190,6 +202,12 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 
 ## Phase 7: GPU Cloud (Giai đoạn C — sau khi Phase B ổn trên Mac)
 
+- [ ] **7.0 Fix Dockerfile protobuf path** *(mới, bug)*: `Dockerfile` hiện compile proto ra
+    `./src/image_generation_pb2.py` (sed `from src import image_generation_pb2`), nhưng toàn bộ
+    code (`server.py`, `image_service.py`) import từ `service.generated.*` — đúng path mà
+    `scripts/generate_proto.sh` dùng (`src/service/generated/`). Phải sửa `Dockerfile` dùng
+    `--python_out=./src/service/generated` (và sed tương ứng) **trước khi** bật lại
+    `api-server`/`celery-worker` trong `docker-compose.yml`, nếu không container sẽ lỗi import.
 - [ ] **7.1 Docker production** (multi-stage, non-root, HEALTHCHECK)
 - [ ] **7.2 GPU runtime**
     - [ ] Bật `nvidia` trong `docker-compose.yml`

@@ -46,8 +46,8 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "The rabbit is eating carrot in the garden."
-        caption = "Chú thỏ đang ăn cà rốt trong vườn."
+        prompt = "[style:retro] The family bird is singing a song on a tree branch"
+        caption = "Gia đình nhà chim đang hót líu lo trên cành cây"
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")

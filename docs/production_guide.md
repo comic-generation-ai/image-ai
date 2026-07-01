@@ -60,7 +60,9 @@ graph LR
 ### Giải pháp Production:
 *   Giữ bức ảnh trong RAM dưới dạng đối tượng PIL Image.
 *   Chuyển đổi thành luồng byte nhị phân (`io.BytesIO`) và upload thẳng lên MinIO/S3 qua mạng.
-*   Trả về **Presigned URL** (đường dẫn tạm thời có thời hạn, ví dụ: 7 ngày) để Frontend hiển thị thẳng cho người dùng mà không cần đi qua Backend trung gian.
+*   Trả về **Presigned URL** (đường dẫn tạm thời có thời hạn — `.env` hiện tại đặt
+    `PRESIGNED_TTL_SECONDS=604800` tức 7 ngày; mặc định code nếu không set qua `.env` là 3600s/1
+    giờ) để Frontend hiển thị thẳng cho người dùng mà không cần đi qua Backend trung gian.
 
 ```python
 import io
@@ -89,9 +91,14 @@ minio_client.put_object(
 > Trong truyện tranh, nhiều nhân vật hoặc bối cảnh sẽ có prompt giống hệt nhau ở các khung hình khác nhau. Việc chạy mô hình AI để vẽ lại một bức ảnh giống hệt là cực kỳ lãng phí tiền bạc và thời gian.
 
 ### Giải pháp Production:
-*   Băm (Hash MD5) toàn bộ tham số đầu vào: `md5(prompt + seed + size + caption)`.
-*   Lưu kết quả link ảnh MinIO vào Redis Cache với khóa là mã hash trên (thời gian hết hạn TTL là 14 ngày).
+*   Băm (Hash MD5) toàn bộ tham số ảnh hưởng output: prompt, seed, caption, size, steps, model,
+    guidance, lora, style, format (xem `redis_cache.generate_hash_key`; version hiện tại `v5` qua
+    `.env`, mặc định code `v3` nếu không set).
+*   Lưu kết quả link ảnh MinIO vào Redis Cache với khóa là mã hash trên (`.env` hiện tại đặt
+    `REDIS_CACHE_TTL_SECONDS=604800` tức 7 ngày; mặc định code nếu không set là 3600s/1 giờ).
 *   Khi có request mới, kiểm tra Redis trước. Nếu trúng cache (Cache Hit), trả về link ảnh ngay lập tức (**0 giây xử lý GPU**).
+*   Chống thundering herd: khi nhiều request cùng cache-miss 1 hash key, chỉ 1 worker được cấp
+    lock để render — các request còn lại chờ rồi đọc lại cache thay vì render trùng.
 
 ---
 
@@ -114,8 +121,10 @@ minio_client.put_object(
 
 ### Giải pháp Production:
 *   Cung cấp API `CancelTask(task_id)` qua gRPC.
-*   Gọi lệnh thu hồi nhiệm vụ của Celery: `celery_app.control.revoke(task_id, terminate=True, signal='SIGKILL')`.
-*   Lập tức dừng tiến trình sinh ảnh đang chạy để nhường GPU cho tác vụ tiếp theo.
+*   Gọi lệnh thu hồi nhiệm vụ của Celery theo 2 bước: `revoke(task_id, terminate=False)` trước để
+    chặn task chưa chạy, sau đó `revoke(task_id, terminate=True)` để dừng sớm nếu đã bắt đầu chạy.
+*   Signal `task_revoked` kích hoạt dọn VRAM ngay (`vram_manager.clear_cache()`), không đợi task
+    kết thúc tự nhiên.
 
 ---
 
