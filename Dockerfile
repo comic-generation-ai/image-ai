@@ -14,14 +14,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Biên dịch protobuf
-RUN python -m grpc_tools.protoc \
+# Biên dịch protobuf — khớp đường dẫn thật mà code import (src/service/generated/),
+# giống scripts/generate_proto.sh dùng cho dev local.
+RUN mkdir -p ./src/service/generated \
+    && python -m grpc_tools.protoc \
     -I./proto \
-    --python_out=./src \
-    --pyi_out=./src \
-    --grpc_python_out=./src \
+    --python_out=./src/service/generated \
+    --pyi_out=./src/service/generated \
+    --grpc_python_out=./src/service/generated \
     ./proto/image_generation.proto \
-    && sed -i 's/import image_generation_pb2/from src import image_generation_pb2/g' ./src/image_generation_pb2_grpc.py
+    && sed -i 's/import image_generation_pb2/from . import image_generation_pb2/g' ./src/service/generated/image_generation_pb2_grpc.py \
+    && touch ./src/service/generated/__init__.py
 
 # Expose gRPC port
 EXPOSE 50051

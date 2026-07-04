@@ -1,8 +1,11 @@
+import io
 import os
+import re
 import shutil
 import threading
 from pathlib import Path
 
+import requests
 import torch
 
 from PIL import Image
@@ -10,7 +13,7 @@ from dataclasses import dataclass
 from diffusers import (
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
-    EulerAncestralDiscreteScheduler,
+    DPMSolverMultistepScheduler,
 )
 
 from config.settings import get_settings
@@ -19,7 +22,6 @@ from core.lora_loader import lora_loader
 from core.vram_manager import vram_manager
 
 logger = get_logger(__name__)
-
 
 @dataclass
 class ImageRequest:
@@ -38,6 +40,7 @@ class ImageRequest:
     prompt: str
     width: int = 1024
     height: int = 1024
+    reference_image_url: str = ""
     seed: int = -1
     steps: int = 4
     guidance_scale: float | None = None
@@ -160,7 +163,8 @@ class PipelineRunner:
         )
         return (
             f"{self.model_id}|comic_style={self.settings.COMIC_STYLE_ENABLED}|"
-            f"style={style_suffix}|lora={self.lora_signature}"
+            f"style={style_suffix}|lora={self.lora_signature}|"
+            f"ip_adapter={self.settings.IP_ADAPTER_ENABLED}:{self.settings.IP_ADAPTER_SCALE}"
         )
 
     @property
@@ -197,26 +201,52 @@ class PipelineRunner:
             strict_compatibility=self.settings.LORA_STRICT_COMPATIBILITY,
         )
 
+    _MJ_FLAG_PATTERN = re.compile(r"--\w+\s+\S+")
+
+    def _strip_midjourney_flags(self, text: str) -> str:
+        """Loại cú pháp riêng của Midjourney (--ar 16:9, --v 5, --style raw,...) —
+        CLIP/SD không hiểu, chỉ tokenize thành rác và phí ngân sách 77 token."""
+        cleaned = self._MJ_FLAG_PATTERN.sub("", text)
+        return re.sub(r"\s{2,}", " ", cleaned).strip().rstrip(",").strip()
+
     def _build_prompt(self, prompt: str, style: str = "") -> str:
         prompt = (prompt or "").strip()
         clean_prompt, parsed_style = self._parse_style_from_prompt(prompt)
+        clean_prompt = self._strip_midjourney_flags(clean_prompt)
         style_to_use = (style or parsed_style or "").strip().lower()
 
-        trigger_words = self.settings.LORA_TRIGGER_WORDS.strip()
+        # Chỉ chèn trigger words khi LoRA thực sự bật — nếu không sẽ phí ngân sách
+        # ký tự cho từ khoá vô nghĩa với base model (vd "EldritchComicsXL").
+        trigger_words = self.settings.LORA_TRIGGER_WORDS.strip() if self.settings.LORA_ENABLED else ""
         if trigger_words:
             clean_prompt = f"{trigger_words}, {clean_prompt}" if clean_prompt else trigger_words
         if not self.settings.COMIC_STYLE_ENABLED:
             return self._truncate_for_clip(clean_prompt)
-            
+
         if style_to_use in STYLE_PRESETS:
             style_suffix = STYLE_PRESETS[style_to_use]["suffix"]
         else:
             style_suffix = self.settings.COMIC_STYLE_PROMPT_SUFFIX.strip()
-            
+
         if not style_suffix:
             return self._truncate_for_clip(clean_prompt)
         if not clean_prompt:
             return self._truncate_for_clip(style_suffix)
+
+        # Ưu tiên giữ nguyên style_suffix (chặn multi-panel + định hướng phong cách) —
+        # cắt bớt phần mô tả cảnh (thường từ story-ai, có thể rất dài) để nhường chỗ,
+        # tránh suffix bị rơi mất hoàn toàn khi prompt đầu vào đã gần/vượt giới hạn CLIP.
+        limit = self.settings.MAX_PROMPT_CHARS
+        reserved = len(style_suffix) + 2  # ", "
+        prompt_budget = max(limit - reserved, 0)
+        if len(clean_prompt) > prompt_budget:
+            trimmed_prompt = clean_prompt[:prompt_budget].rsplit(",", 1)[0].strip()
+            logger.warning(
+                f"Prompt mô tả cảnh bị rút gọn {len(clean_prompt)} → {len(trimmed_prompt)} ký tự "
+                f"để dành {len(style_suffix)} ký tự cho style suffix (giới hạn tổng {limit} ký tự)."
+            )
+            clean_prompt = trimmed_prompt
+
         return self._truncate_for_clip(f"{clean_prompt}, {style_suffix}")
 
     def _truncate_for_clip(self, text: str) -> str:
@@ -234,9 +264,13 @@ class PipelineRunner:
     def _build_negative_prompt(self, negative_prompt: str, style: str = "") -> str:
         style_to_use = (style or "").strip().lower()
         if style_to_use in STYLE_PRESETS:
+            # Style preset cụ thể luôn kèm negative prompt tương ứng, kể cả khi
+            # COMIC_STYLE_ENABLED=false (người dùng đã chủ động chọn style qua tag).
             default_neg = STYLE_PRESETS[style_to_use]["negative"]
-        else:
+        elif self.settings.COMIC_STYLE_ENABLED:
             default_neg = self.settings.DEFAULT_NEGATIVE_PROMPT
+        else:
+            default_neg = ""
 
         parts = [
             value.strip()
@@ -316,11 +350,22 @@ class PipelineRunner:
         self.pipeline = pipeline_cls.from_pretrained(self.model_id, **kwargs)
 
         if not self.is_turbo:
-            self.pipeline.scheduler = (
-                EulerAncestralDiscreteScheduler.from_config(
-                    self.pipeline.scheduler.config
-                )
+            # DPM++ 2M Karras: giữ nguyên config gốc của checkpoint (beta_schedule,
+            # prediction_type,...) qua from_config — chỉ override phần Karras/dpmsolver++.
+            self.pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
+                self.pipeline.scheduler.config,
+                use_karras_sigmas=True,
+                algorithm_type="dpmsolver++",
             )
+
+        if self.settings.IP_ADAPTER_ENABLED:
+            self.pipeline.load_ip_adapter(
+                "h94/IP-Adapter",
+                subfolder="sdxl_models" if self.is_sdxl else "models",
+                weight_name="ip-adapter_sdxl.bin" if self.is_sdxl else "ip-adapter_sd15.bin",
+            )
+            self.pipeline.set_ip_adapter_scale(self.settings.IP_ADAPTER_SCALE)
+            logger.info(f"IP-Adapter enabled (scale={self.settings.IP_ADAPTER_SCALE})")
 
         if self._uses_mps_offload():
             self.pipeline.enable_sequential_cpu_offload()
@@ -391,6 +436,32 @@ class PipelineRunner:
         images = self.pipeline.image_processor.postprocess(decoded, output_type="pil")
         return images[0]
 
+    def _load_reference_image(self, url: str) -> Image.Image | None:
+        if not url:
+            return None
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception as e:
+            logger.warning(
+                f"Không tải được ảnh tham chiếu ({url}): {e} — sinh ảnh không dùng reference."
+            )
+            return None
+
+    _BLANK_IP_ADAPTER_IMAGE: Image.Image | None = None
+
+    def _blank_ip_adapter_image(self) -> Image.Image:
+        """Ảnh giả (placeholder) cho IP-Adapter khi không có reference thật.
+
+        Diffusers yêu cầu luôn phải truyền ip_adapter_image một khi pipeline đã
+        load_ip_adapter() — không truyền sẽ crash 'NoneType is not iterable'. Dùng
+        ảnh trắng trơn + set_ip_adapter_scale(0) để triệt tiêu ảnh hưởng thị giác.
+        """
+        if self._BLANK_IP_ADAPTER_IMAGE is None:
+            self._BLANK_IP_ADAPTER_IMAGE = Image.new("RGB", (224, 224), color="white")
+        return self._BLANK_IP_ADAPTER_IMAGE
+
     def _run_inference(
         self,
         *,
@@ -401,6 +472,7 @@ class PipelineRunner:
         steps: int,
         guidance_scale: float,
         generator: torch.Generator,
+        reference_image: Image.Image | None = None,
     ) -> Image.Image:
         pipe_kwargs = {
             "prompt": prompt,
@@ -411,6 +483,8 @@ class PipelineRunner:
             "guidance_scale": guidance_scale,
             "generator": generator,
         }
+        if reference_image is not None:
+            pipe_kwargs["ip_adapter_image"] = reference_image
         if self._uses_mps_cpu_decode():
             pipe_kwargs["output_type"] = "latent"
         result = self.pipeline(**pipe_kwargs)
@@ -429,6 +503,7 @@ class PipelineRunner:
             # Chạy thử 1 step cực nhẹ với prompt trống và kích thước tối thiểu
             width = min(384, self.settings.DEFAULT_WIDTH)
             height = min(384, self.settings.DEFAULT_HEIGHT)
+            
             steps = 1
             
             generator = torch.Generator(
@@ -436,7 +511,10 @@ class PipelineRunner:
             ).manual_seed(42)
             
             guidance_scale = self._default_guidance_scale()
-            
+
+            if self.settings.IP_ADAPTER_ENABLED:
+                self.pipeline.set_ip_adapter_scale(0.0)
+
             with torch.inference_mode():
                 self._run_inference(
                     prompt="warmup",
@@ -446,6 +524,11 @@ class PipelineRunner:
                     steps=steps,
                     guidance_scale=guidance_scale,
                     generator=generator,
+                    reference_image=(
+                        self._blank_ip_adapter_image()
+                        if self.settings.IP_ADAPTER_ENABLED
+                        else None
+                    ),
                 )
             logger.info("Khởi động (warmup) mô hình thành công!")
         except Exception as e:
@@ -486,6 +569,7 @@ class PipelineRunner:
             request.height,
             request.steps,
         )
+        
         with self._lock:
             try:
                 with torch.inference_mode():
@@ -520,6 +604,22 @@ class PipelineRunner:
                         request.negative_prompt, style_to_use
                     )
 
+                    reference_image = None
+                    if self.settings.IP_ADAPTER_ENABLED:
+                        real_reference = None
+                        if request.reference_image_url:
+                            real_reference = self._load_reference_image(request.reference_image_url)
+
+                        if real_reference is not None:
+                            reference_image = real_reference
+                            self.pipeline.set_ip_adapter_scale(self.settings.IP_ADAPTER_SCALE)
+                        else:
+                            # Không có reference (panel đầu) hoặc tải lỗi — vẫn phải truyền
+                            # ip_adapter_image (diffusers bắt buộc một khi đã load_ip_adapter),
+                            # dùng ảnh trắng trơn + scale=0 để không ảnh hưởng thị giác.
+                            reference_image = self._blank_ip_adapter_image()
+                            self.pipeline.set_ip_adapter_scale(0.0)
+
                     image = self._run_inference(
                         prompt=prompt,
                         negative_prompt=negative_prompt,
@@ -528,6 +628,7 @@ class PipelineRunner:
                         steps=request.steps,
                         guidance_scale=guidance_scale,
                         generator=generator,
+                        reference_image=reference_image,
                     )
                 if image.mode not in ("RGB", "RGBA"):
                     image = image.convert("RGB")

@@ -54,14 +54,17 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(f"width phải trong khoảng 8..{settings.MAX_WIDTH} và chia hết cho 8")
                 return image_generation_pb2.GenerateImageResponse()
+            
             if height <= 0 or height > settings.MAX_HEIGHT or height % 8 != 0:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(f"height phải trong khoảng 8..{settings.MAX_HEIGHT} và chia hết cho 8")
                 return image_generation_pb2.GenerateImageResponse()
+            
             if steps < settings.MIN_STEPS or steps > settings.MAX_STEPS:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(f"num_inference_steps phải trong khoảng {settings.MIN_STEPS}..{settings.MAX_STEPS}")
                 return image_generation_pb2.GenerateImageResponse()
+            
             if len(request.caption_text or "") > settings.CAPTION_MAX_LENGTH:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(f"caption_text vượt quá {settings.CAPTION_MAX_LENGTH} ký tự")
@@ -78,7 +81,8 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
                 seed=request.seed,
                 steps=steps,
                 caption_text=request.caption_text,
-                style=style
+                style=style,
+                reference_image_url=(request.reference_image_url or "").strip(),
             )
             
             logger.info(f"Đã đẩy task vào queue hàng đợi thành công | Celery Task ID: {async_result.id}")

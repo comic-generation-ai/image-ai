@@ -70,16 +70,24 @@ class LoraLoader:
         strict: bool = True,
     ) -> str:
         lora_format = self.inspect_format(lora_path)
-        pipeline_name = pipeline.__class__.__name__.lower()
+        pipeline_name = pipeline.__class__.__name__.lower().replace("_", "")
 
-        is_sdxl_pipeline = "stable_diffusion_xl" in pipeline_name or "stablediffusionxl" in pipeline_name
-        is_sd_pipeline = "stable_diffusion" in pipeline_name or "stablediffusion" in pipeline_name
+        is_sdxl_pipeline = "stablediffusionxl" in pipeline_name
+        # "stablediffusion" cũng là substring của "stablediffusionxlpipeline" — phải loại
+        # trừ XL riêng, nếu không is_sd_pipeline sẽ luôn True kể cả khi pipeline là SDXL.
+        is_sd_pipeline = "stablediffusion" in pipeline_name and not is_sdxl_pipeline
 
-        if lora_format in {"dit", "flux_or_sd3"} and (is_sdxl_pipeline or is_sd_pipeline):
+        incompatible = (
+            lora_format in {"dit", "flux_or_sd3"} and (is_sdxl_pipeline or is_sd_pipeline)
+        ) or (
+            lora_format == "sdxl" and is_sd_pipeline
+        )
+
+        if incompatible:
             message = (
                 f"LoRA '{lora_path}' có format '{lora_format}' nhưng pipeline hiện tại là "
-                f"{pipeline.__class__.__name__}. LoRA này không tương thích với SD/SDXL Turbo; "
-                "hãy dùng LoRA SDXL, hoặc đổi sang đúng base pipeline/model của LoRA."
+                f"{pipeline.__class__.__name__}. LoRA này không tương thích với pipeline hiện tại; "
+                "hãy dùng đúng LoRA cho kiến trúc model, hoặc đổi model cho khớp LoRA."
             )
             if strict:
                 raise RuntimeError(message)

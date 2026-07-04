@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     CELERY_TASK_SOFT_TIME_LIMIT: int = Field(default=3300, description="Celery soft task time limit in seconds")
     MAX_STEPS: int = Field(default=20, description="Maximum number of steps")
     MIN_STEPS: int = Field(default=1, description="Minimum number of steps")
-    DEFAULT_STEPS: int = Field(default=4, description="Default inference steps")
-    DEFAULT_WIDTH: int = Field(default=768, description="Default generated image width (768 nhanh hơn 1024 trên turbo)")
-    DEFAULT_HEIGHT: int = Field(default=768, description="Default generated image height")
+    DEFAULT_STEPS: int = Field(default=20, description="Default inference steps (SD1.5 non-turbo)")
+    DEFAULT_WIDTH: int = Field(default=512, description="Default generated image width")
+    DEFAULT_HEIGHT: int = Field(default=512, description="Default generated image height")
     MAX_WIDTH: int = Field(default=1024, description="Maximum width")
     MAX_HEIGHT: int = Field(default=1024, description="Maximum height")
     CAPTION_MAX_LENGTH: int = Field(default=500, description="Maximum caption length")
@@ -72,8 +72,15 @@ class Settings(BaseSettings):
     CELERY_TIMEZONE: str = Field(default="Asia/Ho_Chi_Minh")
     CELERY_ENABLE_UTC: bool = Field(default=True)
     
+    # IP-Adapter Settings
+    IP_ADAPTER_ENABLED: bool = Field(default=False, description="Enable IP-Adapter for image-to-image generation")
+    IP_ADAPTER_SCALE: float = Field(default=0.6, description="Scale factor for IP-Adapter")
+    
     # AI Model settings
-    MODEL_ID: str = Field(default="Lykon/dreamshaper-xl-v2-turbo")
+    # Default khớp baseline thật đang chạy (Dreamshaper 8, SD1.5, Mac dev) — nếu .env
+    # lỡ không load được (bug đã gặp — cwd sai khi chạy celery từ src/), fallback vẫn
+    # đúng hướng thay vì âm thầm quay lại SDXL Turbo với steps/guidance sai lệch hẳn.
+    MODEL_ID: str = Field(default="Lykon/dreamshaper-8")
     LOW_VRAM_MODE: bool = Field(default=False)
     MODEL_MIN_FREE_DISK_GB: float = Field(
         default=10.0,
@@ -83,15 +90,20 @@ class Settings(BaseSettings):
     COMIC_STYLE_PROMPT_SUFFIX: str = Field(
         default=(
             "storybook watercolor, cute chibi children, pastel colors, "
-            "bright background, comic panel, sharp focus"
+            "bright background, single comic panel, one scene, sharp focus"
         ),
-        description="Style suffix appended to user prompts (giữ ngắn cho CLIP 77 token)",
+        description=(
+            "Style suffix appended to user prompts (giữ ngắn cho CLIP 77 token). "
+            "Dùng số ít 'panel'/'scene' — số nhiều dễ khiến model tự vẽ collage "
+            "nhiều khung trong 1 ảnh, sai với mô hình 1 lần gọi = 1 khung."
+        ),
     )
     DEFAULT_NEGATIVE_PROMPT: str = Field(
         default=(
             "blurry, out of focus, low resolution, pixelated, noisy, jpeg artifacts, "
             "photorealistic, realistic photo, dull colors, muddy details, bad anatomy, "
-            "deformed hands, extra fingers, distorted face, text, watermark, logo"
+            "deformed hands, extra fingers, distorted face, text, watermark, logo, "
+            "comic strip, panel grid, multiple panels, split screen, collage, montage"
         ),
         description="Default negative prompt for non-zero CFG generation",
     )
@@ -116,8 +128,8 @@ class Settings(BaseSettings):
         description="VAE fp32 + UNet fp16 — tránh NaN decode mà vẫn vừa RAM Mac.",
     )
     MPS_ENABLE_SEQUENTIAL_CPU_OFFLOAD: bool = Field(
-        default=True,
-        description="Chuyển layer sang CPU khi không dùng — bắt buộc cho SDXL trên Mac 8–16GB.",
+        default=False,
+        description="Chuyển layer sang CPU khi không dùng — chỉ bật khi chạy SDXL trên Mac 8–16GB.",
     )
     MPS_USE_CPU_GENERATOR: bool = Field(
         default=True,
@@ -128,14 +140,14 @@ class Settings(BaseSettings):
         description="empty_cache MPS sau mỗi ảnh — tắt để ổn định/tăng tốc trên Mac.",
     )
     MAX_PROMPT_CHARS: int = Field(
-        default=280,
+        default=380,
         description="Giới hạn độ dài prompt (CLIP ~77 token) để tránh truncate lỗi.",
     )
     DISABLE_DIFFUSERS_SAFETY_CHECKER: bool = Field(
         default=True,
         description="Tắt safety checker tích hợp diffusers (thường thay ảnh bằng khung đen).",
     )
-    GUIDANCE_SCALE: float = Field(default=2.0, description="Default CFG guidance for non-Turbo models")
+    GUIDANCE_SCALE: float = Field(default=7.0, description="Default CFG guidance for non-Turbo models")
     OUTPUT_VALIDATION_ENABLED: bool = Field(
         default=True,
         description="Kiểm tra ảnh trước upload — từ chối ảnh đen/hỏng.",
@@ -176,8 +188,11 @@ class Settings(BaseSettings):
     )
     
     # Configuration to load from .env file (biến dạng IMAGE_AI_* trong .env)
+    # Neo theo vị trí settings.py (không dùng cwd) — celery bắt buộc chạy từ src/ để
+    # import được package worker.*, nhưng .env nằm ở project root; nếu để đường dẫn
+    # tương đối thì Settings sẽ âm thầm bỏ qua .env và dùng default cứng trong code.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(Path(__file__).resolve().parent.parent.parent / ".env"),
         env_file_encoding="utf-8",
         env_prefix="IMAGE_AI_",
         extra="ignore",

@@ -47,6 +47,7 @@ class RedisCacheManager:
         jpeg_quality: int = 0,
         png_compress_level: int = 0,
         style: str = "",
+        reference_image_url: str = "",
     ) -> str:
         """
         Tạo mã khóa MD5 từ tất cả các tham số ảnh để kiểm tra trùng lặp prompt đầu vào.
@@ -62,6 +63,7 @@ class RedisCacheManager:
             "model_id": model_id,
             "guidance_scale": guidance_scale,
             "lora_id": lora_id or "",
+            "reference_image_url": reference_image_url or "",
             "output_image_format": output_image_format,
             "jpeg_quality": jpeg_quality,
             "png_compress_level": png_compress_level,

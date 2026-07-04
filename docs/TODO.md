@@ -20,11 +20,15 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 
 ## Benchmark đã đo (baseline — cần restart worker để cập nhật)
 
-| Cấu hình (log 2026-06-06) | Diffusion 4 steps | Tổng task | Ghi chú |
-|---------------------------|-------------------|-----------|---------|
-| SDXL Turbo + LoRA + MPS sequential offload | ~192s (~48s/step) | **212s** | Worker start 09:54 — **chưa áp dụng `.env` mới** |
+| Cấu hình (log 2026-07-04) | Diffusion | Tổng task | Ghi chú |
+|---------------------------|-----------|-----------|---------|
+| SDXL Turbo + LoRA + MPS sequential offload | ~192s (~48s/step) | **212s** | Log cũ 2026-06-06 — model đã đổi, không còn dùng |
 | Cache hit (cùng prompt/seed) | 0s GPU | **0.01s** | Redis cache hoạt động đúng |
-| `.env` hiện tại | **dreamshaper-8** (SD 1.5), 512×512, 15 steps, CFG=7.0, LoRA off, offload off | *chưa đo* | Khác hẳn model đã benchmark ở trên (SDXL Turbo) — cần chạy `test_client.py` để đo baseline mới |
+| **`.env` hiện tại**: dreamshaper-8, 20 steps, DPM++ Karras, CFG=7.0, LoRA off, IP-Adapter off | ~2-4s/step | **~80-100s** | Đo thật, RAM máy rảnh (~1.5GB free) |
+| Cùng cấu hình nhưng RAM máy gần cạn (~65-100MB free) | ~30-40s/step | **~750-800s** | Swap-thrashing — không phải bug code, do máy 8GB thiếu RAM khi chạy nhiều app khác cùng lúc |
+| + IP-Adapter bật (`IMAGE_AI_IP_ADAPTER_ENABLED=true`) | ~30-40s/step | **~745s** | Đo thật — CLIP vision encoder thêm ăn RAM, đẩy máy vào swap ngay cả khi RAM còn tạm ổn trước đó. **Không khả thi trên Mac 8GB**, đã tắt lại |
+
+**Bài học vận hành quan trọng:** trên máy 8GB, tốc độ sinh ảnh phụ thuộc rất nhiều vào RAM còn trống lúc chạy (Chrome/IDE mở nhiều làm chậm gấp 10 lần dù code không đổi). Luôn đóng bớt app trước khi demo/benchmark.
 
 ---
 
@@ -42,8 +46,38 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 *   **GPU/CPU health**: `CheckGpuHealth`, `CheckCpuHealth`, `ClearGpuCache` đã implement trong
     `image_service.py` — **đã xong**, chưa có trong roadmap gốc bên dưới.
 *   **Caption**: 1 bubble cố định ở đáy ảnh (`caption_text`); proto có `speech_bubbles` nhưng **chưa implement**.
-*   **Trang 2×2 / nhất quán nhân vật**: **chưa có** — cần Phase B.
+*   **Trang 2×2**: **chưa có** — cần Phase B.
+*   **Nhất quán nhân vật (IP-Adapter)**: **code đã xong** (`_load_reference_image`, `_blank_ip_adapter_image`,
+    `set_ip_adapter_scale` động theo request, cache key + `cache_signature` đã tính cả reference/IP-Adapter
+    state) và nối dây đầy đủ gRPC → Celery → pipeline. Nhưng **tắt mặc định** qua `IMAGE_AI_IP_ADAPTER_ENABLED=false`
+    vì đo thật trên Mac 8GB chậm gấp ~10 lần (xem bảng benchmark). Bật lại khi có GPU cloud, không cần sửa code.
+*   **Prompt engineering**: đã strip cú pháp Midjourney (`--ar 16:9`,...), ưu tiên giữ style suffix khi
+    prompt dài (cắt bớt phần mô tả cảnh thay vì làm rơi suffix), bỏ LoRA trigger words khi LoRA tắt.
 *   **Cancel**: có; `test_cancel_task` gửi revoke sau khi task đã chạy xong → revoke muộn (cần hardening 4.2).
+    Với pool `solo`, revoke **không dừng được** task đang chạy giữa chừng (`NotImplementedError: TaskPool
+    does not implement kill_job`) — task vẫn chạy hết, chỉ được đánh dấu "revoked" trong sổ sách Celery.
+
+---
+
+## Bug đã fix (changelog rút gọn, 2026-07)
+
+*   **`.env` không load được khi celery chạy từ `src/`** — `Settings.model_config.env_file` dùng
+    đường dẫn tương đối theo cwd; celery bắt buộc chạy từ `src/` (để import `worker.*`) nhưng `.env`
+    ở project root → Settings âm thầm rơi về default cứng (từng chạy nhầm SDXL Turbo thay vì
+    Dreamshaper 8 suốt nhiều lần test). Đã fix: neo `env_file` theo vị trí `settings.py`.
+*   **`/healthz` `pipeline_ready` luôn `false`** — check nhầm `pipeline_runner.pipeline` của process
+    server.py (không bao giờ load model, chỉ Celery worker mới load). Đã fix: đọc cờ Redis
+    `image_ai:worker_ready` do worker tự ghi sau khi warmup xong.
+*   **`lora_loader.validate_compatibility()` không chặn LoRA SDXL chạy trên pipeline SD1.x** — do
+    2 biến `is_sdxl_pipeline`/`is_sd_pipeline` chồng lấn (SDXL pipeline luôn khớp cả 2). Đã fix.
+*   **`test_client.py`**: typo `prinst`→`print` (crash `NameError`); bỏ `continue` gây busy-loop
+    bỏ qua `time.sleep(2)` khi poll `PROCESSING`.
+*   **Prompt quá dài từ story-ai bị cắt mất style suffix** (bao gồm cụm chặn multi-panel) — đảo
+    ưu tiên: giữ nguyên suffix, cắt bớt phần mô tả cảnh; thêm strip cú pháp Midjourney (`--ar 16:9`).
+*   **IP-Adapter crash `NoneType is not iterable`** khi không có `reference_image_url` — diffusers
+    bắt buộc luôn truyền `ip_adapter_image` một khi đã `load_ip_adapter()`. Đã fix: dùng ảnh trắng
+    placeholder + `set_ip_adapter_scale(0)` khi không có reference thật.
+*   **`Dockerfile` compile proto sai path** — đã sửa khớp `scripts/generate_proto.sh`.
 
 ---
 
@@ -84,24 +118,28 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 - [ ] **2.10 Determinism & seed policy**
     - [x] `seed=-1` sinh ngẫu nhiên trong worker
     - [ ] Trả `seed` thực trong `GetTaskStatus` response (proto mở rộng nếu cần)
-- [ ] **2.10b Mac performance profiles** *(mới)*
-    > **Cập nhật thực tế:** `.env` hiện tại KHÔNG dùng `sd-turbo` như profile `fast` dự kiến bên
-    > dưới — đang chạy `dreamshaper-8` (SD 1.5, non-turbo) 512×512/15 steps/CFG=7.0, LoRA off,
-    > offload off. Cần benchmark lại theo profile này (bảng benchmark dưới đây đã cũ, đo trên SDXL Turbo).
-    - [ ] Profile `fast`: sd-turbo, 512×512, 4 steps, LoRA off, offload off
-    - [ ] Profile `quality`: SDXL + LoRA — **chỉ dùng trên GPU cloud**, không kỳ vọng nhanh trên Mac
-    - [ ] Document: `MPS_DECODE_ON_CPU` + `steps=4` — không tăng steps để “đẹp hơn” trên Mac (chậm tuyến tính)
-    - [ ] **Restart worker sau đổi `.env`** — ghi vào Runbook
+- [x] **2.10b Mac performance profiles** *(đã chốt, không còn theo plan gốc sd-turbo)*
+    Profile Mac thực tế đang dùng: `dreamshaper-8` (SD 1.5, non-turbo), 512×512, **20 steps**,
+    DPM++ 2M Karras scheduler, CFG=7.0, LoRA off, offload off. Khác hẳn plan gốc (`sd-turbo` 4 steps)
+    — quyết định giữ non-turbo vì chất lượng, chấp nhận chậm hơn (~80-100s/panel khi RAM rảnh).
+    Profile `quality` (SDXL/Flux + LoRA) vẫn để dành GPU cloud, không kỳ vọng nhanh trên Mac.
+    **Restart worker sau đổi `.env`** — đã ghi rõ trong README.
 
 ### 2B — Nhất quán nhân vật (Giai đoạn B — bắt buộc cho 4 khung)
 
-- [ ] **2.11 Character Consistency** — **ƯU TIÊN CAO**
-    - [ ] Thiết kế `CharacterReference` trong proto: `character_id`, `reference_image_url`, `description`
-    - [ ] Panel 1: sinh từ text; lưu ảnh panel 1 làm reference cho panel 2–4
-    - [ ] Tích hợp **IP-Adapter** (hoặc InstantID) vào pipeline — đọc `reference_image_url`
-    - [ ] Cache embedding theo `character_id` trong Redis (TTL) để không tính lại mỗi panel
-    - [ ] Prompt template: giữ `character_id` + mô tả cố định xuyên suốt 4 panel
-    - [ ] *Mac:* chấp nhận chậm hơn; *Cloud:* bật IP-Adapter đầy đủ
+- [~] **2.11 Character Consistency** — code xong, tạm khoá do giới hạn RAM Mac
+    - [x] `reference_image_url` đã có trong proto (field 1) — không cần proto mới
+    - [x] Panel 1: sinh từ text (reference rỗng); orchestrator lưu URL panel 1 làm reference cho panel 2–4
+        (logic đã có sẵn trong `orchestrator-ai/src/workflow/comic_job.py`)
+    - [x] Tích hợp **IP-Adapter** (`h94/IP-Adapter`) vào `pipeline_runner.py` — đọc `reference_image_url`,
+        tải ảnh qua `requests`, truyền `ip_adapter_image` + `set_ip_adapter_scale` động mỗi request
+    - [ ] Cache embedding theo `character_id` trong Redis (TTL) để không tính lại mỗi panel — **chưa làm**,
+        không cấp thiết vì tính năng đang tắt
+    - [ ] Prompt template giữ `character_id` xuyên suốt 4 panel — phụ thuộc story-ai bổ sung
+        `character_ids`/character bible (xem `story-ai/TASKS_FOR_NHAN.md` — hiện đang KHÔNG yêu cầu Nhân
+        làm việc này, Quý tự xử lý phía orchestrator sau)
+    - [x] *Mac:* đã benchmark — **~745s/panel, không khả thi**, tắt qua `IMAGE_AI_IP_ADAPTER_ENABLED=false`.
+        *Cloud:* bật lại khi có GPU, chỉ cần đổi `.env`, không sửa code.
 
 ### 2C — Thoại & layout truyện (Giai đoạn B)
 
@@ -156,7 +194,7 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 - [x] **3.1 MinIO upload RAM + presigned URL**
 - [x] **3.3 Redis cache MD5**
 - [x] **3.4 Thundering herd lock**
-- [x] **3.5 Cache versioning** (v5)
+- [x] **3.5 Cache versioning** (đặt qua `.env`, hiện tại `v6`)
 - [ ] **3.2 MinIO reliability** (retry, timeout)
 - [ ] **3.6 Celery result vs cache thống nhất**
 - [ ] **3.7 Page-level cache** *(mới)*: cache cả trang 2×2, không chỉ từng panel
@@ -229,14 +267,17 @@ Mục tiêu cuối: **trang truyện 2×2 (4 panel)**, mỗi panel có **bong b�
 
 ---
 
-## Thứ tự làm tiếp (đề xuất tuần này)
+## Thứ tự làm tiếp (cập nhật 2026-07)
 
-1. **Restart worker** → xác nhận log in `sd-turbo`, `LoRA disabled`, `offload=false` → đo lại thời gian.
-2. **6.4** Ghi benchmark vào bảng trên.
-3. **2.12** Speech bubbles đa nhân vật (proto đã có).
-4. **2.11** IP-Adapter + reference từ panel 1.
-5. **2.15 + 2.16** Ghép trang 2×2 + task `generate_comic_page`.
-6. **7.2** GPU cloud + benchmark thesis.
+1. ~~IP-Adapter + reference từ panel 1~~ — **xong**, tạm khoá do RAM Mac (mục 2.11).
+2. Chuyển qua **orchestrator-ai**: dùng gRPC client gọi image-ai thật (thay mock story),
+   parse schema thật của story-ai (`panel_number`/`image_prompt`/`dialogue`, không phải
+   `index`/`prompt_en`/`caption_vi` như proto gốc — xem memory `comicsystem-story-ai-schema`).
+3. **2.15 + 2.16** Ghép trang 2×2 — quyết định làm trong image-ai (API `GenerateComicPage`) hay
+   để orchestrator tự ghép Pillow sau khi nhận đủ 4 URL (chưa chốt).
+4. **2.12** Speech bubbles theo vị trí nhân vật (đã bàn hướng asset PNG bong bóng vẽ sẵn +
+   Pillow composite, chưa code).
+5. **7.2** GPU cloud + bật lại IP-Adapter + benchmark thesis (sau bảo vệ).
 
 ---
 
@@ -261,10 +302,11 @@ flowchart TB
     A --> M[MinIO page URL]
 ```
 
-**Mục tiêu thời gian (realistic):**
+**Mục tiêu thời gian:**
 
 | Môi trường | 4 panel + ghép trang |
 |------------|----------------------|
-| Mac + sd-turbo + IP-Adapter | ~4–8 phút (chấp nhận cho dev) |
-| GPU cloud RTX 4090 | ~1–2.5 phút |
+| Mac (dreamshaper-8, 20 steps), không IP-Adapter | ~5-7 phút (đo thật, RAM rảnh) |
+| Mac + IP-Adapter | **~50 phút** (đo thật `1 panel = ~745s`) — **không khả thi, đã tắt** |
+| GPU cloud (chưa đo — kỳ vọng, cần benchmark thật khi có) | ~1–2.5 phút |
 | Cache hit (cùng trang) | < 5 giây |

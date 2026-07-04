@@ -4,7 +4,7 @@ Dịch vụ AI sinh ảnh và xử lý hậu kỳ tranh truyện tranh tự đ�
 Dịch vụ được thiết kế tối ưu hóa cho phần cứng GPU, giao tiếp bất đồng bộ thông qua gRPC và xử lý hàng đợi Celery.
 
 ## Tính năng & Kỹ thuật nổi bật trong đồ án
-1. **Model Stable Diffusion 1.5 (Dreamshaper 8)**: `.env` hiện tại chạy `Lykon/dreamshaper-8` (SD 1.5, không phải turbo) ở 512×512, ~15 steps, CFG=7.0 — cân bằng tốc độ/chất lượng trên Mac. Code cũng hỗ trợ đổi model qua `IMAGE_AI_MODEL_ID` sang `stabilityai/sd-turbo` (4-8 steps, nhanh hơn) hoặc `Lykon/dreamshaper-xl-v2-turbo` (SDXL, cần GPU khỏe hơn) — xem comment trong `.env`.
+1. **Model Stable Diffusion 1.5 (Dreamshaper 8)**: `.env` hiện tại chạy `Lykon/dreamshaper-8` (SD 1.5, không phải turbo) ở 512×512, 20 steps, CFG=7.0 — cân bằng tốc độ/chất lượng trên Mac. Code cũng hỗ trợ đổi model qua `IMAGE_AI_MODEL_ID` sang `stabilityai/sd-turbo` (4-8 steps, nhanh hơn) hoặc `Lykon/dreamshaper-xl-v2-turbo` (SDXL, cần GPU khỏe hơn) — xem comment trong `.env`.
 2. **Hệ thống giao tiếp gRPC Asynchronous**: Toàn bộ business logic (`GenerateImageAsync`, `GetTaskStatus`, `CancelTask`, `CheckHealth`, `CheckGpuHealth`, `CheckCpuHealth`, `ClearGpuCache`) chạy qua gRPC/Protobuf; REST (FastAPI) chỉ phục vụ `/healthz` và `/metrics`.
 3. **Message Queue (Celery + Redis)**: Xếp hàng xử lý tác vụ GPU tuần tự (`concurrency=1`, `worker_prefetch_multiplier=1`), loại bỏ hoàn toàn lỗi tràn bộ nhớ VRAM (`CUDA Out of Memory`).
 4. **Hậu kỳ Pillow chèn chữ Tiếng Việt**: Tạo viền đen và hộp thoại màu trắng mờ (alpha channel), tự động bẻ chữ xuống dòng phù hợp kích thước khung truyện.
@@ -13,6 +13,8 @@ Dịch vụ được thiết kế tối ưu hóa cho phần cứng GPU, giao ti�
 7. **Style Presets**: 5 style dựng sẵn (`storybook`, `anime`, `manga`, `retro`, `american_comic`) tự thêm suffix + negative prompt phù hợp; chọn qua field `style` trong request hoặc tag `[style:xxx]` ngay trong prompt.
 8. **Tối ưu Apple Silicon (MPS)**: Xử lý riêng cho Mac M-series — decode VAE trên CPU + generator CPU để tránh NaN/ảnh đen khi chạy fp16 trên MPS. Sequential CPU offload có sẵn trong code nhưng **đang tắt** trong `.env` hiện tại vì Dreamshaper 8 (SD 1.5) nhẹ hơn SDXL, không cần offload — xem các biến `IMAGE_AI_MPS_*`.
 9. **Output Validation & Safety**: Kiểm tra ảnh đen/hỏng trước khi upload (`OUTPUT_MIN_MEAN_BRIGHTNESS`) và lọc NSFW bằng `Falconsai/nsfw_image_detection` trước khi trả kết quả.
+10. **Nhất quán nhân vật qua IP-Adapter** (`reference_image_url`): code đã implement đầy đủ (tải ảnh panel tham chiếu, `h94/IP-Adapter`, đặt `ip_adapter_image` + `set_ip_adapter_scale`), nhưng **đang tắt mặc định** (`IMAGE_AI_IP_ADAPTER_ENABLED=false`) — đo thực tế trên Mac 8GB cho thấy chậm gấp ~10 lần (từ ~80s lên ~745s/panel) do tràn RAM/swap. Bật lại khi có GPU cloud (không cần sửa code, chỉ đổi `.env`).
+11. **Mỗi lần gọi `GenerateImageAsync` = 1 bố cục/1 cảnh duy nhất** — orchestrator gọi lặp 4 lần để ra 4 panel rồi tự ghép trang, image-ai không tự vẽ nhiều khung trong 1 ảnh (đã có prompt engineering + negative prompt chặn việc này).
 
 ---
 
@@ -42,7 +44,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. Tạo file cấu hình `.env`
-`.env` (không commit git) đang có sẵn, cấu hình chạy `Lykon/dreamshaper-8` (SD 1.5, 512×512, 15
+`.env` (không commit git) đang có sẵn, cấu hình chạy `Lykon/dreamshaper-8` (SD 1.5, 512×512, 20
 steps, CFG=7.0) — phù hợp Mac. Nếu cần tạo lại từ template:
 ```bash
 cp .env.example .env

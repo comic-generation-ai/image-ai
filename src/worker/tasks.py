@@ -26,6 +26,10 @@ from logger.config import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
+# Cờ báo worker đã nạp xong pipeline — lưu Redis vì gRPC/FastAPI server (server.py) và
+# Celery worker là 2 process riêng, không share state Python trực tiếp được.
+WORKER_READY_KEY = "image_ai:worker_ready"
+
 @worker_process_init.connect
 def init_worker_process(**kwargs):
     """
@@ -34,8 +38,11 @@ def init_worker_process(**kwargs):
     """
     logger.info("--- KHỞI TẠO CELERY WORKER PROCESS ---")
     logger.info("Đang tiến hành nạp trước mô hình Stable Diffusion và chạy warmup...")
+    redis_cache_manager.initialize_client()
+    redis_cache_manager.client.delete(WORKER_READY_KEY)
     try:
         pipeline_runner.warmup()
+        redis_cache_manager.client.set(WORKER_READY_KEY, "1")
         logger.info("--- KHỞI TẠO CELERY WORKER PROCESS HOÀN TẤT ---")
     except Exception as e:
         logger.error(f"✗ Lỗi khi khởi tạo mô hình trong worker process: {e}")
@@ -52,7 +59,7 @@ def on_task_revoked(sender=None, request=None, **kwargs):
 
 @celery_app.task(bind=True, name="worker.tasks.generate_image_task")
 
-def generate_image_task(self, prompt: str, width: int, height: int, seed: int, steps: int, caption_text: str, style: str = ""):
+def generate_image_task(self, prompt: str, width: int, height: int, seed: int, steps: int, caption_text: str, style: str = "", reference_image_url: str = ""):
     """
     Nhiệm vụ Celery chạy ngầm chính:
     Thực hiện điều phối từ A-Z quy trình sinh ảnh và hậu kỳ.
@@ -80,6 +87,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         jpeg_quality=settings.JPEG_QUALITY,
         png_compress_level=settings.PNG_COMPRESS_LEVEL,
         style=style,
+        reference_image_url=reference_image_url,
     )
     
     # Kiểm tra cache trong Redis
@@ -136,6 +144,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
                 seed=actual_seed,
                 steps=steps,
                 style=style,
+                reference_image_url=reference_image_url,
             )
         )
         raw_image = response.image

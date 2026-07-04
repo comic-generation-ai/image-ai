@@ -18,6 +18,7 @@ ENV/
 # Model weights (Crucial: never commit weights to git!)
 .cache/
 hf_cache/
+model/
 models/
 *.safetensors
 *.bin

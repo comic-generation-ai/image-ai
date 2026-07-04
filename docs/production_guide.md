@@ -92,8 +92,8 @@ minio_client.put_object(
 
 ### Giải pháp Production:
 *   Băm (Hash MD5) toàn bộ tham số ảnh hưởng output: prompt, seed, caption, size, steps, model,
-    guidance, lora, style, format (xem `redis_cache.generate_hash_key`; version hiện tại `v5` qua
-    `.env`, mặc định code `v3` nếu không set).
+    guidance, lora, style, reference_image_url, format (xem `redis_cache.generate_hash_key`;
+    version hiện tại `v6` qua `.env`, mặc định code `v3` nếu không set).
 *   Lưu kết quả link ảnh MinIO vào Redis Cache với khóa là mã hash trên (`.env` hiện tại đặt
     `REDIS_CACHE_TTL_SECONDS=604800` tức 7 ngày; mặc định code nếu không set là 3600s/1 giờ).
 *   Khi có request mới, kiểm tra Redis trước. Nếu trúng cache (Cache Hit), trả về link ảnh ngay lập tức (**0 giây xử lý GPU**).
@@ -125,6 +125,11 @@ minio_client.put_object(
     chặn task chưa chạy, sau đó `revoke(task_id, terminate=True)` để dừng sớm nếu đã bắt đầu chạy.
 *   Signal `task_revoked` kích hoạt dọn VRAM ngay (`vram_manager.clear_cache()`), không đợi task
     kết thúc tự nhiên.
+*   **Giới hạn thật đã gặp**: worker chạy pool `solo` (bắt buộc cho GPU/MPS tuần tự) **không hỗ
+    trợ dừng job đang chạy giữa chừng** (`NotImplementedError: TaskPool does not implement
+    kill_job`) — `revoke(terminate=True)` chỉ dừng được task chưa bắt đầu, task đang generate dở
+    vẫn chạy hết tự nhiên. Cần hardening riêng nếu muốn cancel thật giữa chừng (theo dõi
+    `docs/TODO.md` mục 4.2b).
 
 ---
 
@@ -136,3 +141,8 @@ minio_client.put_object(
 ### Giải pháp Production:
 *   **FastAPI Health Server**: Chạy song song trên một luồng phụ (daemon thread) cung cấp endpoint `/healthz` để kiểm tra kết nối giữa Service với Redis và MinIO.
 *   **Prometheus Metrics**: Cung cấp endpoint `/metrics` đo lượng VRAM còn lại, nhiệt độ GPU, số lượng tác vụ đang chờ trong hàng đợi (Queue Length) và thời gian sinh ảnh trung bình.
+*   **Lưu ý 2 process riêng biệt**: gRPC/FastAPI server (`server.py`) và Celery worker chạy 2 process
+    Python khác nhau — object Python (kể cả singleton `pipeline_runner`) **không share state trực
+    tiếp** giữa 2 process. Trường `pipeline_ready` trong `/healthz` vì vậy phải đọc qua cờ Redis
+    (`image_ai:worker_ready`, worker tự ghi sau khi warmup xong) thay vì check biến cục bộ trong
+    process server — nếu không sẽ luôn báo `false` dù worker đã sẵn sàng thật.

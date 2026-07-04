@@ -46,8 +46,8 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "[style:retro] The family bird is singing a song on a tree branch"
-        caption = "Gia đình nhà chim đang hót líu lo trên cành cây"
+        prompt = "A beautiful Vietnamese village at dusk, warm golden hour lighting. Tấm, a gentle and beautiful young woman wearing modest but elegant royal attire mixed with traditional áo tứ thân, walks along a dirt path towards a traditional thatched-roof house. In the background, a tall, slender areca palm tree sways in the wind. Melancholic yet peaceful mood, wide shot, comic book style, vibrant colors, detailed line art --ar 16:9"
+        caption = "Tấm trở về, mang theo lòng hiếu thảo, nhưng không mang theo sự đề phòng"
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")
@@ -57,9 +57,9 @@ def test_grpc_service():
             width=512,          # Dùng kích thước nhỏ để sinh ảnh nhanh khi test
             height=512,
             seed=42,
-            num_inference_steps=15,
+            num_inference_steps=20,
             caption_text=caption,
-            style="retro"       # Sử dụng trường style mới trong gRPC
+           # Sử dụng trường style mới trong gRPC
         )
         
         resp = stub.GenerateImageAsync(req)
@@ -74,9 +74,7 @@ def test_grpc_service():
             status_resp = stub.GetTaskStatus(status_req)
             status_name = image_generation_pb2.ImageGenerationStatus.Name(status_resp.status)
             print(f"   [{i*2}s] Trạng thái: {status_name}")
-            
-            if status_resp.status == image_generation_pb2.PROCESSING:
-                continue
+
             if status_resp.status == image_generation_pb2.SUCCESS:
                 print(f"\nSINH ẢNH THÀNH CÔNG!")
                 print(f"Đường dẫn MinIO Presigned URL:\n{status_resp.minio_url}")
