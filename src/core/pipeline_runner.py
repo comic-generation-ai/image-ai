@@ -14,7 +14,13 @@ from diffusers import (
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
     DPMSolverMultistepScheduler,
+    LCMScheduler,
 )
+
+try:
+    from compel import Compel
+except ImportError:
+    Compel = None
 
 from config.settings import get_settings
 from logger.config import get_logger
@@ -100,8 +106,9 @@ class PipelineRunner:
 
         self.model_id = self.settings.MODEL_ID
         self.low_vram_mode = self.settings.LOW_VRAM_MODE
-
+        self.compel = None
         self.pipeline = None
+        
 
         self._lock = threading.Lock()
 
@@ -136,12 +143,19 @@ class PipelineRunner:
     def is_turbo(self) -> bool:
         return "turbo" in self.model_id.lower()
 
+    @property
+    def is_lcm(self) -> bool:
+        return "lcm" in self.model_id.lower()
+
     def _default_guidance_scale(self) -> float:
         # SD-Turbo: CFG thấp/0; trên MPS fp16 thường cần 0 để tránh ảnh đen/artifact.
         if self.is_turbo:
             if self.device == "mps":
                 return self.settings.MPS_TURBO_GUIDANCE_SCALE
             return self.settings.TURBO_GUIDANCE_SCALE
+        # LCM distill: CFG 1.0-2.0; >1 thì negative prompt mới có tác dụng
+        if self.is_lcm:
+            return self.settings.LCM_GUIDANCE_SCALE
         return self.settings.GUIDANCE_SCALE
 
     def _generator_device(self) -> str:
@@ -277,7 +291,9 @@ class PipelineRunner:
             for value in [negative_prompt, default_neg]
             if value and value.strip()
         ]
-        return ", ".join(dict.fromkeys(parts))
+        # Negative prompt cũng bị giới hạn CLIP 77 token như prompt dương —
+        # không cắt thì transformers truncate câm lặng phần đuôi.
+        return self._truncate_for_clip(", ".join(dict.fromkeys(parts)))
 
     def _configure_hf_cache(self) -> None:
         """Dùng MODEL_CACHE_DIR từ settings thay vì ~/.cache mặc định."""
@@ -349,7 +365,12 @@ class PipelineRunner:
         )
         self.pipeline = pipeline_cls.from_pretrained(self.model_id, **kwargs)
 
-        if not self.is_turbo:
+        if self.is_lcm:
+            self.pipeline.scheduler = LCMScheduler.from_config(
+                self.pipeline.scheduler.config
+            )
+            logger.info("LCM model: scheduler = LCMScheduler")
+        elif not self.is_turbo:
             # DPM++ 2M Karras: giữ nguyên config gốc của checkpoint (beta_schedule,
             # prediction_type,...) qua from_config — chỉ override phần Karras/dpmsolver++.
             self.pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
@@ -380,9 +401,61 @@ class PipelineRunner:
         self._configure_mps_precision()
         with torch.inference_mode():
             self._ensure_lora_loaded()
+            
+        self._init_compel()
 
         logger.info("Pipeline initialized successfully")
+        
+        
+    def _init_compel(self):
+        if Compel is None:
+            logger.warning("Compel not installed, weighted prompts will not work")
+            return
+            
+        try:
+            self.compel = Compel(
+                tokenizer=self.pipeline.tokenizer,
+                text_encoder=self.pipeline.text_encoder,
+                truncate_long_prompts=False
+            )
+            logger.info("Compel initialized successfully")
+        except Exception as e:
+            self.compel = None
+            logger.error(f"Failed to initialize Compel: {e}")
 
+    # Compel coi ( ) + và - cuối từ là cú pháp weighting — prompt tự nhiên chứa
+    # ngoặc đơn hoặc từ có gạch nối (hand-drawn, close-up) sẽ bị parse sai nghĩa.
+    _COMPEL_UNSAFE_CHARS = str.maketrans({"(": " ", ")": " ", "+": " ", "-": " "})
+
+    def _encode_with_compel(self, prompt: str, negative_prompt: str) -> dict | None:
+        """
+        Encode prompt bằng Compel: chia chunk 77 token, encode từng chunk rồi nối
+        embeddings — bỏ được giới hạn CLIP với prompt dài từ story-ai.
+        Trả về dict prompt_embeds/negative_prompt_embeds, hoặc None để caller
+        fallback về đường truyền prompt dạng text (bị truncate 77 token).
+        """   
+        if self.compel is None:
+            return None
+        try:
+            clean = prompt.translate(self._COMPEL_UNSAFE_CHARS)
+            clean_neg = (negative_prompt or "").translate(self._COMPEL_UNSAFE_CHARS)
+            conditioning = self.compel(clean)
+            negative_conditioning = self.compel(clean_neg)
+            # Bắt buộc pad về cùng số chunk: prompt dài 2-3 chunk còn negative
+            # thường 1 chunk — lệch shape là pipeline crash ngay bước CFG.
+            [conditioning, negative_conditioning] = (
+                self.compel.pad_conditioning_tensors_to_same_length(
+                    [conditioning, negative_conditioning]
+                )
+            )
+            return {
+                "prompt_embeds": conditioning,
+                "negative_prompt_embeds": negative_conditioning,
+            }
+        except Exception as e:
+            logger.warning(f"Compel encode thất bại ({e}) — fallback prompt dạng text")
+            return None
+    
     def _uses_mps_offload(self) -> bool:
         return (
             self.device == "mps"
@@ -475,14 +548,19 @@ class PipelineRunner:
         reference_image: Image.Image | None = None,
     ) -> Image.Image:
         pipe_kwargs = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
             "width": width,
             "height": height,
             "num_inference_steps": steps,
             "guidance_scale": guidance_scale,
             "generator": generator,
         }
+        
+        embeds_kwargs = self._encode_with_compel(prompt, negative_prompt)
+        if embeds_kwargs is not None:
+            pipe_kwargs.update(embeds_kwargs)
+        else:
+            pipe_kwargs["prompt"] = prompt
+            pipe_kwargs["negative_prompt"] = negative_prompt
         if reference_image is not None:
             pipe_kwargs["ip_adapter_image"] = reference_image
         if self._uses_mps_cpu_decode():
@@ -500,9 +578,10 @@ class PipelineRunner:
         self.initialize_pipeline()
         logger.info("Bắt đầu khởi động (warmup) mô hình Stable Diffusion...")
         try:
-            # Chạy thử 1 step cực nhẹ với prompt trống và kích thước tối thiểu
-            width = min(384, self.settings.DEFAULT_WIDTH)
-            height = min(384, self.settings.DEFAULT_HEIGHT)
+            # Warmup đúng resolution mặc định — kernel MPS biên dịch theo kích thước,
+            # warmup 384 thì request 512 đầu tiên vẫn tốn ~17-19s biên dịch lại.
+            width = self.settings.DEFAULT_WIDTH
+            height = self.settings.DEFAULT_HEIGHT
             
             steps = 1
             

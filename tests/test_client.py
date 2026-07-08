@@ -32,7 +32,7 @@ def test_grpc_service():
     channel = grpc.insecure_channel("localhost:50051")
     stub = image_generation_pb2_grpc.ImageGenerationServiceStub(channel)
     
-    # 2.1 Check Health gRPC
+    # Check Health gRPC
     try:
         print("Đang gửi yêu cầu gRPC CheckHealth...")
         health_resp = stub.CheckHealth(image_generation_pb2.CheckHealthRequest())
@@ -46,8 +46,12 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "A beautiful Vietnamese village at dusk, warm golden hour lighting. Tấm, a gentle and beautiful young woman wearing modest but elegant royal attire mixed with traditional áo tứ thân, walks along a dirt path towards a traditional thatched-roof house. In the background, a tall, slender areca palm tree sways in the wind. Melancholic yet peaceful mood, wide shot, comic book style, vibrant colors, detailed line art --ar 16:9"
-        caption = "Tấm trở về, mang theo lòng hiếu thảo, nhưng không mang theo sự đề phòng"
+        prompt = """a girl with long wavy brown hair, flowing cream dress, standing beside white horse,
+        sun-drenched beach, golden afternoon light, soft sand, gentle waves, ocean horizon,
+        clear blue sky, breeze in hair and dress, calm soft smile, looking at viewer,
+        horse with flowing mane, peaceful serene mood, classic portrait painting,
+        soft lighting, timeless quality"""
+        caption = ""
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
         print(f"   Caption: '{caption}'")
@@ -57,7 +61,7 @@ def test_grpc_service():
             width=512,          # Dùng kích thước nhỏ để sinh ảnh nhanh khi test
             height=512,
             seed=42,
-            num_inference_steps=20,
+            # Không truyền num_inference_steps — server tự dùng IMAGE_AI_DEFAULT_STEPS
             caption_text=caption,
            # Sử dụng trường style mới trong gRPC
         )

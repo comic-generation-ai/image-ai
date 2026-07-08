@@ -147,7 +147,18 @@ class Settings(BaseSettings):
         default=True,
         description="Tắt safety checker tích hợp diffusers (thường thay ảnh bằng khung đen).",
     )
+    SAFETY_CHECKER_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "NSFW checker riêng (ViT ~500MB RAM, +1-3s/ảnh) — lớp lọc NSFW duy nhất "
+            "của hệ thống. Dev Mac 8GB có thể tắt; production/demo phải bật."
+        ),
+    )
     GUIDANCE_SCALE: float = Field(default=7.0, description="Default CFG guidance for non-Turbo models")
+    LCM_GUIDANCE_SCALE: float = Field(
+        default=1.5,
+        description="CFG cho model LCM (1.0-2.0; >1 thì negative prompt mới hoạt động)",
+    )
     OUTPUT_VALIDATION_ENABLED: bool = Field(
         default=True,
         description="Kiểm tra ảnh trước upload — từ chối ảnh đen/hỏng.",

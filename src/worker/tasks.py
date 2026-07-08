@@ -230,6 +230,10 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         }
     finally:
         active_gpu_tasks.dec()
-        vram_manager.clear_cache()  # Giải phóng RAM & VRAM triệt để trong mọi tình huống (thành công, lỗi, timeout, cancel)
+        # MPS: giữ cache giữa các task — clear xong task kế tiếp phải cấp phát lại
+        # toàn bộ buffer (đo thực tế tốn ~15-20s/task trên Mac 8GB). CUDA vẫn clear
+        # để trả VRAM. Cùng điều kiện với finally trong pipeline_runner.generate.
+        if pipeline_runner.device != "mps" or settings.MPS_CLEAR_CACHE_AFTER_GENERATE:
+            vram_manager.clear_cache()
         if lock_acquired:
             redis_cache_manager.release_generation_lock(hash_key)

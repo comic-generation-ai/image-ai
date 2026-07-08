@@ -33,15 +33,17 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
             width = request.width if request.width > 0 else settings.DEFAULT_WIDTH
             height = request.height if request.height > 0 else settings.DEFAULT_HEIGHT
             
-            # Tự động tối ưu số bước lặp (steps) cho các model non-turbo (như dreamshaper-8)
-            # Nếu client yêu cầu số steps quá nhỏ (ví dụ < 10) mà model hiện tại không phải turbo,
-            # ta sẽ tự động ghi đè bằng giá trị cấu hình DEFAULT_STEPS để đảm bảo chất lượng ảnh không bị xấu/nhiễu.
-            is_turbo = "turbo" in settings.MODEL_ID.lower()
+            # Tự động tối ưu số bước lặp (steps) cho các model thường (như dreamshaper-8)
+            # Nếu client yêu cầu steps quá nhỏ (< 10) mà model không phải loại ít-step
+            # (turbo/LCM vốn chạy chuẩn ở 4-6 steps), ghi đè bằng DEFAULT_STEPS để
+            # đảm bảo chất lượng ảnh không bị xấu/nhiễu.
+            model_id_lower = settings.MODEL_ID.lower()
+            is_fast_model = "turbo" in model_id_lower or "lcm" in model_id_lower
             requested_steps = request.num_inference_steps
             if requested_steps > 0:
-                if not is_turbo and requested_steps < 10:
+                if not is_fast_model and requested_steps < 10:
                     logger.warning(
-                        f"Model {settings.MODEL_ID} không phải là Turbo nhưng nhận yêu cầu steps={requested_steps} quá thấp. "
+                        f"Model {settings.MODEL_ID} không phải loại ít-step (turbo/LCM) nhưng nhận yêu cầu steps={requested_steps} quá thấp. "
                         f"Tự động điều chỉnh lên default steps={settings.DEFAULT_STEPS} để đảm bảo chất lượng."
                     )
                     steps = settings.DEFAULT_STEPS
