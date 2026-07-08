@@ -60,6 +60,7 @@ message TaskStatusResponse {
   ImageGenerationStatus status = 2;              // PENDING, PROCESSING, SUCCESS, FAILED
   string minio_url = 3;           // Presigned URL trỏ tới ảnh trên MinIO (nếu SUCCESS)
   string error_message = 4;       // Thông báo lỗi nếu thất bại
+  int32 seed = 5;
 }
 
 message CancelRequest{

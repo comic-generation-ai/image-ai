@@ -6,12 +6,10 @@ from core.vram_manager import vram_manager
 from config.settings import get_settings
 from logger.config import get_logger
 
-# Import các module được sinh ra tự động từ file .proto
 try:
     from .generated import image_generation_pb2
     from .generated import image_generation_pb2_grpc
 except ImportError:
-    # Fallback cho chạy local khi chưa chạy scripts compile
     import sys
     import os
     sys.path.append(os.path.join(os.path.dirname(__file__), 'generated'))
@@ -109,17 +107,17 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
         logger.info(f"gRPC Kiểm tra trạng thái Task ID: {task_id}")
         
         try:
-            # Lấy thông tin Celery Task từ Redis Backend
             async_result = AsyncResult(task_id, app=celery_app)
             status = async_result.status  # PENDING, STARTED, SUCCESS, FAILURE
             
             response = image_generation_pb2.TaskStatusResponse(task_id=task_id)
             
             if status == "SUCCESS":
-                result = async_result.result  # Kết quả trả về của task
+                result = async_result.result 
                 if result.get("status") == "SUCCESS":
                     response.status = image_generation_pb2.SUCCESS
                     response.minio_url = result.get("minio_url", "")
+                    response.seed = int(result.get("seed", -1) or -1)
                 else:
                     response.status = image_generation_pb2.FAILED
                     response.error_message = result.get("error_message", "Sinh ảnh lỗi trên GPU")

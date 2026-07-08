@@ -363,7 +363,19 @@ class PipelineRunner:
         pipeline_cls = (
             StableDiffusionXLPipeline if self.is_sdxl else StableDiffusionPipeline
         )
-        self.pipeline = pipeline_cls.from_pretrained(self.model_id, **kwargs)
+        try:
+            self.pipeline = pipeline_cls.from_pretrained(self.model_id, **kwargs)
+        except Exception as e:
+            # CUDA yêu cầu variant fp16 nhưng không phải repo nào cũng ship file fp16
+            # (vd một số checkpoint cộng đồng) — tải bản thường rồi cast theo torch_dtype.
+            if kwargs.get("variant") == "fp16":
+                logger.warning(
+                    f"Model không có variant fp16 ({e}) — tải bản thường, cast fp16 sau."
+                )
+                kwargs.pop("variant", None)
+                self.pipeline = pipeline_cls.from_pretrained(self.model_id, **kwargs)
+            else:
+                raise
 
         if self.is_lcm:
             self.pipeline.scheduler = LCMScheduler.from_config(
