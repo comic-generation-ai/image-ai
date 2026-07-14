@@ -72,11 +72,10 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
     start_time = time.time()
     actual_seed = seed if seed != -1 else secrets.randbelow(2**31 - 1)
 
-    # Tính mã khóa Hash Key để check cache
     hash_key = redis_cache_manager.generate_hash_key(
         prompt=prompt,
         seed=actual_seed,
-        caption_text=caption_text,
+        caption_text=caption_text if settings.CAPTION_RENDER_ENABLED else "",
         width=width,
         height=height,
         steps=steps,
@@ -160,12 +159,14 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
                 f"Bức ảnh bị chặn bởi Safety Checker (nsfw_score={safety_result.nsfw_score:.4f})"
             )
 
-        # Hậu kỳ Pillow chèn khung truyện và lời thoại tiếng Việt
+        # Hậu kỳ Pillow: mặc định trả ảnh sạch — caption do FE render bên dưới ảnh
+        # (PanelResult.caption_vi đã có sẵn trong contract orchestrator).
+        # Ảnh sạch cũng là reference sạch cho IP-Adapter (hết lỗi sinh chữ rác).
         raw_image = enhance_comic_image(raw_image)
-        processed_image = add_caption_to_comic(
-            image=raw_image,
-            text=caption_text
-        )
+        if settings.CAPTION_RENDER_ENABLED:
+            processed_image = add_caption_to_comic(image=raw_image, text=caption_text)
+        else:
+            processed_image = raw_image
 
         # Tải ảnh lên MinIO Object Storage
         image_format = settings.OUTPUT_IMAGE_FORMAT.lower()

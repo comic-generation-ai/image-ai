@@ -182,6 +182,13 @@ class Settings(BaseSettings):
     )
 
     # Post-processing Settings
+    CAPTION_RENDER_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Chèn caption vào ảnh (legacy). Mặc định tắt: FE render caption dưới ảnh "
+            "(PanelResult.caption_vi), ảnh sạch làm reference IP-Adapter không lỗi chữ rác."
+        ),
+    )
     COMIC_POSTPROCESS_ENABLED: bool = Field(default=True, description="Enhance generated image sharpness and color")
     SHARPEN_RADIUS: float = Field(default=1.1, description="Unsharp mask radius")
     SHARPEN_PERCENT: int = Field(default=135, description="Unsharp mask strength")
