@@ -1,4 +1,5 @@
 import grpc
+import re
 from celery.result import AsyncResult
 from worker.celery_app import celery_app
 from worker.tasks import generate_image_task
@@ -18,6 +19,13 @@ except ImportError:
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+def _count_subjects(prompt: str) -> int:
+    """Đếm sơ bộ số chủ thể qua từ khóa người/danh từ riêng — heuristic, không cần chính xác tuyệt đối."""
+    subject_words = re.findall(
+        r'\b(girl|boy|man|woman|child|character|[A-Z][a-z]+)\b', prompt
+    )
+    return len(set(w.lower() for w in subject_words))   
 
 class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceServicer):
     
@@ -49,6 +57,13 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
                     steps = requested_steps
             else:
                 steps = settings.DEFAULT_STEPS
+                if _count_subjects(request.prompt) >= 3:
+                    boosted_steps = min(settings.MAX_STEPS, settings.DEFAULT_STEPS + 3)
+                    if boosted_steps > steps:
+                        logger.info(
+                            f"Phát hiện cảnh đông chủ thể (>=3), nâng steps {steps} -> {boosted_steps}"
+                        )
+                        steps = boosted_steps
 
             if width <= 0 or width > settings.MAX_WIDTH or width % 8 != 0:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)

@@ -278,13 +278,9 @@ class PipelineRunner:
     def _build_negative_prompt(self, negative_prompt: str, style: str = "") -> str:
         style_to_use = (style or "").strip().lower()
         if style_to_use in STYLE_PRESETS:
-            # Style preset cụ thể luôn kèm negative prompt tương ứng, kể cả khi
-            # COMIC_STYLE_ENABLED=false (người dùng đã chủ động chọn style qua tag).
             default_neg = STYLE_PRESETS[style_to_use]["negative"]
-        elif self.settings.COMIC_STYLE_ENABLED:
-            default_neg = self.settings.DEFAULT_NEGATIVE_PROMPT
         else:
-            default_neg = ""
+            default_neg = self.settings.DEFAULT_NEGATIVE_PROMPT
 
         parts = [
             value.strip()

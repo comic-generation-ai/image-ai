@@ -46,7 +46,7 @@ def test_grpc_service():
         
     # 2.2 Generate Image
     try:
-        prompt = "A boy and a girl are flying on the moon"
+        prompt = prompt = "[style:american_comic] a girl with long wavy brown hair, flowing cream dress, standing beside white horse, sun-drenched beach"
         caption = ""
         print(f"\n=== 3. YÊU CẦU SINH ẢNH QUA GRPC ===")
         print(f"   Prompt: '{prompt}'")
