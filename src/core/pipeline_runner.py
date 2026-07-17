@@ -63,7 +63,7 @@ class ImageResponse:
 
 STYLE_PRESETS = {
     "storybook": {
-        "suffix": "children storybook illustration, soft watercolor, cute chibi, pastel colors, clean lineart, comic panel",
+        "suffix": "whimsical fable book illustration, highly detailed, vibrant colors, fantasy art style",
         "negative": "ugly, blurry, low quality, photorealistic, 3d render, dark, scary, deformed hands, bad anatomy, text, watermark, logo, nsfw",
     },
     "anime": {
@@ -419,7 +419,10 @@ class PipelineRunner:
         if Compel is None:
             logger.warning("Compel not installed, weighted prompts will not work")
             return
-            
+        if self.is_sdxl:
+            logger.warning("Compel chưa hỗ trợ SDXL dual-encoder — dùng prompt dạng text thuần")
+            return
+
         try:
             self.compel = Compel(
                 tokenizer=self.pipeline.tokenizer,
