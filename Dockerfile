@@ -16,6 +16,14 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Base image conda có sẵn torchaudio biên dịch khớp torch 2.1.0 gốc — sau khi
+# requirements.txt ép nâng torch lên bản mới hơn, .so cũ của torchaudio còn
+# sót lại bị lệch ABI, crash ngay lúc transformers import CLIP (dây chuyền
+# transformers → audio_utils → torchaudio, dù code không hề dùng âm thanh).
+# venv dev (Mac/GPU) không cài torchaudio nên không dính — gỡ hẳn cho khớp,
+# transformers tự bỏ qua import audio khi torchaudio không tồn tại.
+RUN pip uninstall -y torchaudio
+
 COPY . .
 
 # Biên dịch protobuf — khớp đường dẫn thật mà code import (src/service/generated/),
