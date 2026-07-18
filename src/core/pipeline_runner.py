@@ -705,23 +705,28 @@ class PipelineRunner:
         seed = request.seed
         if seed == -1:
             seed = int(torch.randint(0, 2147483647, (1,)).item())
-            
+
+        # Sinh ở ĐÚNG width/height gốc (vuông, đã kiểm chứng ổn định cả
+        # session) rồi mới resize xuống nửa chiều rộng lúc ghép — không truyền
+        # thẳng half_width vào request nữa. Gọi pipeline với tỷ lệ không vuông
+        # (vd 512x1024) đã gây lỗi CUDA/CPU tensor mismatch thật trên GPU
+        # (tỷ lệ đó chưa từng được exercise trước đây, khui bug tiềm ẩn trong
+        # tính toán add_time_ids của SDXL) — resize là thao tác PIL/CPU thuần,
+        # không đụng gì tới pipeline nên an toàn.
         left_response = self._generate_single(
-            replace(request, prompt=left_prompt, width=half_width, seed=seed, reference_image_url="")
+            replace(request, prompt=left_prompt, seed=seed, reference_image_url="")
         )
         right_response = self._generate_single(
-            replace(
-                request,
-                prompt=right_prompt,
-                width=request.width - half_width,
-                seed=seed + 1,
-                reference_image_url="",
-            )
+            replace(request, prompt=right_prompt, seed=seed + 1, reference_image_url="")
         )
 
+        right_width = request.width - half_width
+        left_image = left_response.image.resize((half_width, request.height))
+        right_image = right_response.image.resize((right_width, request.height))
+
         composite = Image.new("RGB", (request.width, request.height))
-        composite.paste(left_response.image, (0, 0))
-        composite.paste(right_response.image, (half_width, 0))
+        composite.paste(left_image, (0, 0))
+        composite.paste(right_image, (half_width, 0))
         return ImageResponse(image=composite, seed=seed)
 
     def generate(self, request: ImageRequest) -> ImageResponse:
