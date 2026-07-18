@@ -9,7 +9,7 @@ import requests
 import torch
 
 from PIL import Image
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from diffusers import (
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
@@ -87,11 +87,6 @@ STYLE_PRESETS = {
 
 class PipelineRunner:
     def _parse_style_from_prompt(self, prompt: str) -> tuple[str, str]:
-        """
-        Phân tích cú pháp prompt để tìm thẻ [style:xxx].
-        Trả về (prompt_clean, style_name).
-        Ví dụ: "[style:anime] a cat" -> ("a cat", "anime")
-        """
         prompt = (prompt or "").strip()
         if prompt.startswith("[style:"):
             end_idx = prompt.find("]")
@@ -148,7 +143,6 @@ class PipelineRunner:
         return "lcm" in self.model_id.lower()
 
     def _default_guidance_scale(self) -> float:
-        # SD-Turbo: CFG thấp/0; trên MPS fp16 thường cần 0 để tránh ảnh đen/artifact.
         if self.is_turbo:
             if self.device == "mps":
                 return self.settings.MPS_TURBO_GUIDANCE_SCALE
@@ -159,7 +153,6 @@ class PipelineRunner:
         return self.settings.GUIDANCE_SCALE
 
     def _generator_device(self) -> str:
-        """MPS Generator trên CPU ổn định hơn — tránh ảnh đen trên Apple Silicon."""
         if self.settings.MPS_USE_CPU_GENERATOR and self.device == "mps":
             return "cpu"
         return self.device
@@ -254,7 +247,7 @@ class PipelineRunner:
         reserved = len(style_suffix) + 2  # ", "
         prompt_budget = max(limit - reserved, 0)
         if len(clean_prompt) > prompt_budget:
-            trimmed_prompt = clean_prompt[:prompt_budget].rsplit(",", 1)[0].strip()
+            trimmed_prompt = self._truncate_scene_prompt(clean_prompt, prompt_budget)
             logger.warning(
                 f"Prompt mô tả cảnh bị rút gọn {len(clean_prompt)} → {len(trimmed_prompt)} ký tự "
                 f"để dành {len(style_suffix)} ký tự cho style suffix (giới hạn tổng {limit} ký tự)."
@@ -263,8 +256,39 @@ class PipelineRunner:
 
         return self._truncate_for_clip(f"{clean_prompt}, {style_suffix}")
 
+    def _truncate_scene_prompt(self, clean_prompt: str, prompt_budget: int) -> str:
+        two_char_match = self._TWO_CHARACTER_PATTERN.match(clean_prompt)
+        if two_char_match:
+            protected = f"on the left, {two_char_match.group('left').strip()}; on the right, "
+            droppable_source = two_char_match.group("right").strip()
+        else:
+            protected = ""
+            droppable_source = clean_prompt
+
+        segments = [s.strip() for s in droppable_source.split(",") if s.strip()]
+        # Chỉ 2 tag ĐẦU (identity, action) được coi là bảo vệ tuyệt đối — mọi
+        # tag sau đó (setting, camera, và các tag khí quyển phụ LLM hay thêm dư
+        # như "dust kicking up") đều droppable, bỏ dần từ cuối tới khi vừa ngân
+        # sách. Không giới hạn cứng "chỉ bỏ tối đa 2 tag" vì thực tế story-ai có
+        # lúc viết 3-4 tag setting/camera thay vì đúng 2 như rule đề ra.
+        min_segments = min(2, len(segments))
+
+        candidate = protected + ", ".join(segments)
+        while len(segments) > min_segments and len(candidate) > prompt_budget:
+            segments = segments[:-1]
+            candidate = protected + ", ".join(segments)
+
+        if len(candidate) <= prompt_budget:
+            return candidate
+
+        logger.warning(
+            "Prompt vẫn vượt ngân sách sau khi đã bỏ hết setting/camera droppable "
+            "— fallback cắt thô, có thể ảnh hưởng phần nhân vật/hành động. "
+            "Cân nhắc tăng IMAGE_AI_MAX_PROMPT_CHARS nếu lỗi này lặp lại nhiều."
+        )
+        return candidate[:prompt_budget].strip()
+
     def _truncate_for_clip(self, text: str) -> str:
-        """CLIP giới hạn ~77 token; cắt sớm để tránh truncate làm hỏng prompt."""
         limit = self.settings.MAX_PROMPT_CHARS
         text = (text or "").strip()
         if len(text) <= limit:
@@ -651,7 +675,62 @@ class PipelineRunner:
         if steps < self.settings.MIN_STEPS or steps > self.settings.MAX_STEPS:
             raise ValueError(f"Steps must be between {self.settings.MIN_STEPS} and {self.settings.MAX_STEPS}")
 
+    _TWO_CHARACTER_PATTERN = re.compile(
+        r"^on the left,\s*(?P<left>.+?);\s*on the right,\s*(?P<right>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def _split_two_character_prompt(self, prompt: str) -> tuple[str, str] | None:
+        clean_prompt, _ = self._parse_style_from_prompt(prompt)
+        match = self._TWO_CHARACTER_PATTERN.match(clean_prompt.strip())
+        if not match:
+            return None
+
+        left = match.group("left").strip().rstrip(",").strip()
+        right = match.group("right").strip().rstrip(",").strip()
+        if not left or not right:
+            return None
+        segments = [s.strip() for s in right.split(",") if s.strip()]
+        tail = ", ".join(segments[-2:]) if len(segments) >= 3 else ""
+        left_prompt = f"{left}, {tail}" if tail else left
+
+        return left_prompt, right
+
+    def _generate_two_character_composite(
+        self, request: ImageRequest, split_prompts: tuple[str, str]
+    ) -> ImageResponse:
+        left_prompt, right_prompt = split_prompts
+        half_width = max(8, (request.width // 2 // 8) * 8)
+
+        seed = request.seed
+        if seed == -1:
+            seed = int(torch.randint(0, 2147483647, (1,)).item())
+            
+        left_response = self._generate_single(
+            replace(request, prompt=left_prompt, width=half_width, seed=seed, reference_image_url="")
+        )
+        right_response = self._generate_single(
+            replace(
+                request,
+                prompt=right_prompt,
+                width=request.width - half_width,
+                seed=seed + 1,
+                reference_image_url="",
+            )
+        )
+
+        composite = Image.new("RGB", (request.width, request.height))
+        composite.paste(left_response.image, (0, 0))
+        composite.paste(right_response.image, (half_width, 0))
+        return ImageResponse(image=composite, seed=seed)
+
     def generate(self, request: ImageRequest) -> ImageResponse:
+        split_prompts = self._split_two_character_prompt(request.prompt)
+        if split_prompts is not None:
+            return self._generate_two_character_composite(request, split_prompts)
+        return self._generate_single(request)
+
+    def _generate_single(self, request: ImageRequest) -> ImageResponse:
 
         self.initialize_pipeline()
         self._validate_inputs(
@@ -659,7 +738,7 @@ class PipelineRunner:
             request.height,
             request.steps,
         )
-        
+
         with self._lock:
             try:
                 with torch.inference_mode():
