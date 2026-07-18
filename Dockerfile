@@ -3,6 +3,10 @@ FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
+# noninteractive: thiếu dòng này apt-get kéo tzdata (transitive dep của
+# libgl1-mesa-glx) sẽ bật prompt hỏi múi giờ — build không có TTY nên treo
+# vô thời hạn, không lỗi rõ ràng, chỉ đứng im ở bước "Geographic area:".
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     git \
     libgl1-mesa-glx \
