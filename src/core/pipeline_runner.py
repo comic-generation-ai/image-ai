@@ -62,24 +62,30 @@ class ImageResponse:
 
 
 STYLE_PRESETS = {
+    # "suffix" rút ngắn hết mức có thể (giữ đúng identity phong cách, bỏ tính
+    # từ đệm chung chung như "highly detailed") — vì reserved budget cho scene
+    # = MAX_PROMPT_CHARS - len(suffix), suffix càng dài thì phần mô tả cảnh
+    # càng dễ bị cắt. Đã xác nhận thật trên GPU: suffix cũ (84-130 ký tự)
+    # khiến prompt 2-nhân-vật thường xuyên bị cắt dù đã tối ưu ở tầng
+    # story-ai/prompt_template.py.
     "storybook": {
-        "suffix": "whimsical fairytale illustration, highly detailed, vibrant colors, fantasy art style",
+        "suffix": "whimsical fairytale illustration, vibrant colors",
         "negative": "ugly, blurry, low quality, photorealistic, 3d render, dark, scary, deformed hands, bad anatomy, text, watermark, logo, nsfw",
     },
     "anime": {
-        "suffix": "anime key visual style, highly detailed digital illustration, vibrant colors, clean lineart, anime background, comic book panel",
+        "suffix": "anime key visual, clean lineart, vibrant colors",
         "negative": "monochrome, black and white, sketch, draft, ugly, blurry, low quality, photorealistic, 3d render, deformed hands, bad anatomy, text, watermark, logo, nsfw",
     },
     "manga": {
-        "suffix": "manga art style, black and white, screen tones, hand-drawn ink sketch, highly detailed lineart, dramatic shading, comic book panel",
+        "suffix": "manga style, black and white, screen tones, ink sketch",
         "negative": "colored, vibrant colors, painting, watercolor, ugly, blurry, low quality, photorealistic, 3d render, deformed hands, bad anatomy, text, watermark, logo, nsfw",
     },
     "retro": {
-        "suffix": "retro classic comic book style, pop art, dot shading halftone print, vintage colors, bold ink outlines, 1980s print quality",
+        "suffix": "retro comic style, halftone print, vintage colors, bold outlines",
         "negative": "modern digital painting, smooth gradients, watercolor, anime, manga, photorealistic, 3d render, ugly, blurry, low quality, text, watermark, logo, nsfw",
     },
     "american_comic": {
-        "suffix": "classic american comic book style, dramatic lighting, bold lines, rich colors, superhero comic art, action panel",
+        "suffix": "classic american comic style, bold lines, dramatic lighting",
         "negative": "anime, manga, watercolor, soft illustration, photorealistic, 3d render, ugly, blurry, low quality, text, watermark, logo, nsfw",
     }
 }
@@ -216,6 +222,31 @@ class PipelineRunner:
         cleaned = self._MJ_FLAG_PATTERN.sub("", text)
         return re.sub(r"\s{2,}", " ", cleaned).strip().rstrip(",").strip()
 
+    # Giới hạn CỨNG thật sự của CLIP text encoder (77 token, tính cả BOS/EOS)
+    # — SDXL dùng 2 tokenizer (CLIP-L + OpenCLIP-bigG), cùng ngưỡng 77.
+    _CLIP_MAX_TOKENS = 77
+
+    def _clip_token_count(self, text: str) -> int:
+        """Đếm token THẬT bằng đúng tokenizer đang dùng — không đoán qua số ký
+        tự. Đã tự đo và xác nhận: ước lượng cũ (320 ký tự ≈ 77 token, tức
+        ~4.15 ký tự/token) sai lệch đáng kể so với thực tế — 1 prompt 356 ký
+        tự đo được chỉ 74 token thật, khiến hệ thống cắt oan (bỏ droppable/
+        cắt tag) dù chưa hề vượt giới hạn CLIP thật. Với SDXL, lấy MAX giữa 2
+        tokenizer để không encoder nào bị CLIP tự cắt câm lặng phía sau.
+        """
+        tokenizers = [self.pipeline.tokenizer]
+        if self.is_sdxl and getattr(self.pipeline, "tokenizer_2", None) is not None:
+            tokenizers.append(self.pipeline.tokenizer_2)
+        counts = []
+        for tok in tokenizers:
+            # Ta CỐ Ý gọi tokenizer không truncation để tự đếm rồi tự quyết
+            # định cắt ở tầng trên — tắt warning "sequence length is longer
+            # than..." của chính thư viện transformers, vì đây không phải
+            # lỗi, chỉ là bước đo trước khi cắt.
+            tok.deprecation_warnings["sequence-length-is-longer-than-the-specified-maximum"] = True
+            counts.append(len(tok(text)["input_ids"]))
+        return max(counts)
+
     def _build_prompt(self, prompt: str, style: str = "") -> str:
         prompt = (prompt or "").strip()
         clean_prompt, parsed_style = self._parse_style_from_prompt(prompt)
@@ -240,72 +271,162 @@ class PipelineRunner:
         if not clean_prompt:
             return self._truncate_for_clip(style_suffix)
 
-        # Ưu tiên giữ nguyên style_suffix (chặn multi-panel + định hướng phong cách) —
-        # cắt bớt phần mô tả cảnh (thường từ story-ai, có thể rất dài) để nhường chỗ,
-        # tránh suffix bị rơi mất hoàn toàn khi prompt đầu vào đã gần/vượt giới hạn CLIP.
-        limit = self.settings.MAX_PROMPT_CHARS
-        reserved = len(style_suffix) + 2  # ", "
-        prompt_budget = max(limit - reserved, 0)
-        if len(clean_prompt) > prompt_budget:
-            trimmed_prompt = self._truncate_scene_prompt(clean_prompt, prompt_budget)
-            logger.warning(
-                f"Prompt mô tả cảnh bị rút gọn {len(clean_prompt)} → {len(trimmed_prompt)} ký tự "
-                f"để dành {len(style_suffix)} ký tự cho style suffix (giới hạn tổng {limit} ký tự)."
-            )
-            clean_prompt = trimmed_prompt
+        full_candidate = f"{clean_prompt}, {style_suffix}"
+        if self._clip_token_count(full_candidate) <= self._CLIP_MAX_TOKENS:
+            return full_candidate
 
-        return self._truncate_for_clip(f"{clean_prompt}, {style_suffix}")
+        # Ưu tiên giữ nguyên style_suffix (chặn multi-panel + định hướng phong
+        # cách) — cắt bớt phần mô tả cảnh (thường từ story-ai) để nhường chỗ,
+        # đo bằng token thật (xem _clip_token_count), không còn đoán qua ký tự.
+        trimmed_prompt = self._truncate_scene_prompt(clean_prompt, style_suffix)
+        logger.warning(
+            f"Prompt mô tả cảnh bị rút gọn (token thật vượt {self._CLIP_MAX_TOKENS}): "
+            f"{len(clean_prompt)} → {len(trimmed_prompt)} ký tự."
+        )
+        return f"{trimmed_prompt}, {style_suffix}"
 
-    # Chỉ dùng để nhận diện prompt 2 nhân vật khi CẮT BỚT (bảo vệ đúng phần
-    # nhân vật/hành động) — không còn dùng để tách-sinh-riêng-rồi-ghép nữa
+    # Nhận diện prompt 2 hoặc 3 nhân vật khi CẮT BỚT (bảo vệ đúng tag nhận
+    # diện từng nhân vật) — không còn dùng để tách-sinh-riêng-rồi-ghép nữa
     # (đã bỏ, vì ảnh ghép luôn có đường ranh giới lộ rõ giữa 2 nửa).
     _TWO_CHARACTER_PATTERN = re.compile(
         r"^on the left,\s*(?P<left>.+?);\s*on the right,\s*(?P<right>.+)$",
         re.IGNORECASE | re.DOTALL,
     )
+    # 3 nhân vật ("on the left, X; in the center, Y; on the right, Z") — đã
+    # xác nhận thật trên GPU: nếu chỉ dùng _TWO_CHARACTER_PATTERN cho câu 3
+    # nhân vật này, regex non-greedy vẫn "khớp" được (nuốt luôn cả 2 nhân vật
+    # đầu — left+center — vào chung 1 nhóm "left", chỉ coi "right" là nhân
+    # vật thứ 3) — hậu quả: chỉ tag của nhân vật ĐẦU TIÊN được bảo vệ, còn
+    # nhân vật GIỮA bị coi là droppable như setting/camera, dễ bị cắt mất
+    # hoàn toàn khi ngân sách eo hẹp. Panel thật đã mất 1 trong 3 nhân vật vì
+    # lỗi này. Phải thử pattern 3-nhân-vật này TRƯỚC pattern 2-nhân-vật.
+    _THREE_CHARACTER_PATTERN = re.compile(
+        r"^on the left,\s*(?P<left>.+?);\s*in the center,\s*(?P<center>.+?);\s*on the right,\s*(?P<right>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    )
 
-    def _truncate_scene_prompt(self, clean_prompt: str, prompt_budget: int) -> str:
-        two_char_match = self._TWO_CHARACTER_PATTERN.match(clean_prompt)
-        if two_char_match:
-            protected = f"on the left, {two_char_match.group('left').strip()}; on the right, "
-            droppable_source = two_char_match.group("right").strip()
+    def _truncate_scene_prompt(self, clean_prompt: str, style_suffix: str) -> str:
+        """Cắt bớt clean_prompt (chưa gồm style_suffix) tới khi
+        f"{candidate}, {style_suffix}" vừa đúng _CLIP_MAX_TOKENS token THẬT —
+        không còn dùng ngân sách ký tự đoán mò. style_suffix truyền vào chỉ để
+        tính token chính xác ở mỗi bước thử, không bị cắt (luôn giữ nguyên)."""
+        def _fits(candidate: str) -> bool:
+            return self._clip_token_count(f"{candidate}, {style_suffix}") <= self._CLIP_MAX_TOKENS
+
+        three_char_match = self._THREE_CHARACTER_PATTERN.match(clean_prompt)
+        two_char_match = None if three_char_match else self._TWO_CHARACTER_PATTERN.match(clean_prompt)
+
+        if three_char_match:
+            blocks = [
+                ("left", three_char_match.group("left")),
+                ("center", three_char_match.group("center")),
+                ("right", three_char_match.group("right")),
+            ]
+        elif two_char_match:
+            blocks = [
+                ("left", two_char_match.group("left")),
+                ("right", two_char_match.group("right")),
+            ]
         else:
-            protected = ""
-            droppable_source = clean_prompt
+            blocks = None
 
-        segments = [s.strip() for s in droppable_source.split(",") if s.strip()]
-        # Chỉ 2 tag ĐẦU (identity, action) được coi là bảo vệ tuyệt đối — mọi
-        # tag sau đó (setting, camera, và các tag khí quyển phụ LLM hay thêm dư
-        # như "dust kicking up") đều droppable, bỏ dần từ cuối tới khi vừa ngân
-        # sách. Không giới hạn cứng "chỉ bỏ tối đa 2 tag" vì thực tế story-ai có
-        # lúc viết 3-4 tag setting/camera thay vì đúng 2 như rule đề ra.
-        min_segments = min(2, len(segments))
+        if blocks is None:
+            segments = [s.strip() for s in clean_prompt.split(",") if s.strip()]
+            min_segments = min(2, len(segments))
+            candidate = ", ".join(segments)
+            while len(segments) > min_segments and not _fits(candidate):
+                segments = segments[:-1]
+                candidate = ", ".join(segments)
+            if _fits(candidate):
+                return candidate
+            logger.warning(
+                "Prompt vẫn vượt token thật sau khi đã bỏ hết setting/camera droppable "
+                "— fallback cắt thô theo từ, có thể ảnh hưởng phần nhân vật/hành động."
+            )
+            words = candidate.split()
+            while len(words) > 1 and not _fits(" ".join(words)):
+                words = words[:-1]
+            return " ".join(words)
 
-        candidate = protected + ", ".join(segments)
-        while len(segments) > min_segments and len(candidate) > prompt_budget:
-            segments = segments[:-1]
-            candidate = protected + ", ".join(segments)
+        # CHỈ segment ĐẦU TIÊN của MỖI bên (tag nhận diện nhân vật, sau khi
+        # tách dấu phẩy) được bảo vệ tuyệt đối; mọi segment sau đó của TẤT
+        # CẢ các bên (action, setting, camera) đều droppable — kể cả bên
+        # trái. Bản cũ chỉ bảo vệ nguyên vẹn bên trái và chỉ cho phép bỏ bớt
+        # bên phải — đã xác nhận thật trên GPU: nếu prompt vượt ngân sách quá
+        # nhiều, dù đã bỏ hết droppable bên phải xuống còn 2 segment vẫn
+        # không đủ, rơi vào nhánh cắt thô cuối cùng — cắt ngang giữa chuỗi,
+        # có lúc cắt đứt luôn tag nhận diện của 1 nhân vật, khiến ảnh sinh ra
+        # THIẾU HẲN nhân vật đó.
+        # "center" dùng giới từ "in", "left"/"right" dùng "on" — giữ đúng văn
+        # phạm gốc mà story-ai/prompt_template.py dạy LLM viết.
+        preposition_by_label = {"left": "on", "center": "in", "right": "on"}
 
-        if len(candidate) <= prompt_budget:
+        parsed = []
+        for label, text in blocks:
+            segs = [s.strip() for s in text.split(",") if s.strip()]
+            parsed.append([label, segs[0], segs[1:]])  # [label, identity, extra] — extra bị sửa tại chỗ
+
+        def _build() -> str:
+            parts = [
+                f"{preposition_by_label[label]} the {label}, " + ", ".join([identity] + extra)
+                for label, identity, extra in parsed
+            ]
+            return "; ".join(parts)
+
+        candidate = _build()
+        # Bỏ droppable ưu tiên từ bên PHẢI NHẤT (nhắc tới sau cùng) trước,
+        # lùi dần về bên trái — giữ như hành vi cũ cho trường hợp 2 nhân vật.
+        for block in reversed(parsed):
+            while block[2] and not _fits(candidate):
+                block[2] = block[2][:-1]
+                candidate = _build()
+
+        if _fits(candidate):
             return candidate
 
+        # Kể cả khi chỉ còn đúng các tag nhận diện (không còn gì droppable) mà
+        # vẫn vượt token thật — hiếm vì tag giờ chỉ 4-6 từ, nhưng vẫn cần
+        # fallback an toàn: giữ nguyên các tag phía trước, chỉ cắt bớt cuối
+        # tag của nhân vật NHẮC TỚI SAU CÙNG — còn hơn cắt bừa vào bất kỳ đâu.
         logger.warning(
-            "Prompt vẫn vượt ngân sách sau khi đã bỏ hết setting/camera droppable "
-            "— fallback cắt thô, có thể ảnh hưởng phần nhân vật/hành động. "
-            "Cân nhắc tăng IMAGE_AI_MAX_PROMPT_CHARS nếu lỗi này lặp lại nhiều."
+            "Prompt nhiều nhân vật vượt token thật dù đã bỏ hết phần droppable, kể "
+            "cả các tag nhận diện gộp lại cũng đã vượt — cắt bớt cuối tag cuối cùng."
         )
-        return candidate[:prompt_budget].strip()
+        identity_parts = [
+            f"{preposition_by_label[label]} the {label}, {identity}" for label, identity, _ in parsed
+        ]
+        candidate = "; ".join(identity_parts)
+        if _fits(candidate):
+            return candidate
+
+        prefix = "; ".join(identity_parts[:-1])
+        if prefix:
+            prefix += "; "
+        last_label, last_identity, _ = parsed[-1]
+        words = last_identity.split()
+        while words and not _fits(prefix + f"{preposition_by_label[last_label]} the {last_label}, " + " ".join(words)):
+            words = words[:-1]
+        last_part = f"{preposition_by_label[last_label]} the {last_label}, " + " ".join(words)
+        return (prefix + last_part).strip()
 
     def _truncate_for_clip(self, text: str) -> str:
-        limit = self.settings.MAX_PROMPT_CHARS
         text = (text or "").strip()
-        if len(text) <= limit:
+        if not text or self._clip_token_count(text) <= self._CLIP_MAX_TOKENS:
             return text
-        trimmed = text[:limit].rsplit(",", 1)[0].strip()
+        segments = [s.strip() for s in text.split(",") if s.strip()]
+        while len(segments) > 1 and self._clip_token_count(", ".join(segments)) > self._CLIP_MAX_TOKENS:
+            segments = segments[:-1]
+        candidate = ", ".join(segments)
+        if self._clip_token_count(candidate) > self._CLIP_MAX_TOKENS:
+            words = candidate.split()
+            while len(words) > 1 and self._clip_token_count(" ".join(words)) > self._CLIP_MAX_TOKENS:
+                words = words[:-1]
+            candidate = " ".join(words)
         logger.warning(
-            f"Prompt bị rút gọn {len(text)} → {len(trimmed)} ký tự (CLIP limit)"
+            f"Prompt bị rút gọn (token thật vượt {self._CLIP_MAX_TOKENS}): "
+            f"{len(text)} → {len(candidate)} ký tự."
         )
-        return trimmed
+        return candidate
 
     def _build_negative_prompt(self, negative_prompt: str, style: str = "") -> str:
         style_to_use = (style or "").strip().lower()
