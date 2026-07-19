@@ -9,7 +9,7 @@ import requests
 import torch
 
 from PIL import Image
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from diffusers import (
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
@@ -63,7 +63,7 @@ class ImageResponse:
 
 STYLE_PRESETS = {
     "storybook": {
-        "suffix": "whimsical fable book illustration, highly detailed, vibrant colors, fantasy art style",
+        "suffix": "whimsical fairytale illustration, highly detailed, vibrant colors, fantasy art style",
         "negative": "ugly, blurry, low quality, photorealistic, 3d render, dark, scary, deformed hands, bad anatomy, text, watermark, logo, nsfw",
     },
     "anime": {
@@ -255,6 +255,14 @@ class PipelineRunner:
             clean_prompt = trimmed_prompt
 
         return self._truncate_for_clip(f"{clean_prompt}, {style_suffix}")
+
+    # Chỉ dùng để nhận diện prompt 2 nhân vật khi CẮT BỚT (bảo vệ đúng phần
+    # nhân vật/hành động) — không còn dùng để tách-sinh-riêng-rồi-ghép nữa
+    # (đã bỏ, vì ảnh ghép luôn có đường ranh giới lộ rõ giữa 2 nửa).
+    _TWO_CHARACTER_PATTERN = re.compile(
+        r"^on the left,\s*(?P<left>.+?);\s*on the right,\s*(?P<right>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    )
 
     def _truncate_scene_prompt(self, clean_prompt: str, prompt_budget: int) -> str:
         two_char_match = self._TWO_CHARACTER_PATTERN.match(clean_prompt)
@@ -675,13 +683,25 @@ class PipelineRunner:
         if steps < self.settings.MIN_STEPS or steps > self.settings.MAX_STEPS:
             raise ValueError(f"Steps must be between {self.settings.MIN_STEPS} and {self.settings.MAX_STEPS}")
 
-    _TWO_CHARACTER_PATTERN = re.compile(
-        r"^on the left,\s*(?P<left>.+?);\s*on the right,\s*(?P<right>.+)$",
-        re.IGNORECASE | re.DOTALL,
-    )
+    def generate(self, request: ImageRequest) -> ImageResponse:
+        two_char_result = self._try_generate_two_characters_regional(request)
+        if two_char_result is not None:
+            return two_char_result
+        return self._generate_single(request)
 
-    def _split_two_character_prompt(self, prompt: str) -> tuple[str, str] | None:
-        clean_prompt, _ = self._parse_style_from_prompt(prompt)
+    def _try_generate_two_characters_regional(
+        self, request: ImageRequest
+    ) -> ImageResponse | None:
+        """Trả None nếu prompt không phải 2-nhân-vật, hoặc nếu regional
+        generation lỗi bất kỳ đâu — caller (generate()) sẽ tự rơi về
+        _generate_single() bình thường. Kỹ thuật này (xem
+        core/regional_generator.py) chưa test được trên GPU thật lúc viết,
+        nên luôn bọc try/except để không làm hỏng cả task khi có lỗi.
+        """
+        if not self.is_sdxl:
+            return None
+
+        clean_prompt, _ = self._parse_style_from_prompt(request.prompt)
         match = self._TWO_CHARACTER_PATTERN.match(clean_prompt.strip())
         if not match:
             return None
@@ -690,50 +710,56 @@ class PipelineRunner:
         right = match.group("right").strip().rstrip(",").strip()
         if not left or not right:
             return None
-        segments = [s.strip() for s in right.split(",") if s.strip()]
-        tail = ", ".join(segments[-2:]) if len(segments) >= 3 else ""
-        left_prompt = f"{left}, {tail}" if tail else left
 
-        return left_prompt, right
+        self.initialize_pipeline()
+        self._validate_inputs(request.width, request.height, request.steps)
 
-    def _generate_two_character_composite(
-        self, request: ImageRequest, split_prompts: tuple[str, str]
-    ) -> ImageResponse:
-        left_prompt, right_prompt = split_prompts
-        half_width = max(8, (request.width // 2 // 8) * 8)
-
-        seed = request.seed
-        if seed == -1:
-            seed = int(torch.randint(0, 2147483647, (1,)).item())
-
-        # Sinh ở ĐÚNG width/height gốc (vuông, đã kiểm chứng ổn định cả
-        # session) rồi mới resize xuống nửa chiều rộng lúc ghép — không truyền
-        # thẳng half_width vào request nữa. Gọi pipeline với tỷ lệ không vuông
-        # (vd 512x1024) đã gây lỗi CUDA/CPU tensor mismatch thật trên GPU
-        # (tỷ lệ đó chưa từng được exercise trước đây, khui bug tiềm ẩn trong
-        # tính toán add_time_ids của SDXL) — resize là thao tác PIL/CPU thuần,
-        # không đụng gì tới pipeline nên an toàn.
-        left_response = self._generate_single(
-            replace(request, prompt=left_prompt, seed=seed, reference_image_url="")
-        )
-        right_response = self._generate_single(
-            replace(request, prompt=right_prompt, seed=seed + 1, reference_image_url="")
+        _, parsed_style = self._parse_style_from_prompt(request.prompt)
+        style_to_use = (request.style or parsed_style or "").strip().lower()
+        guidance_scale = (
+            request.guidance_scale
+            if request.guidance_scale is not None
+            else self._default_guidance_scale()
         )
 
-        right_width = request.width - half_width
-        left_image = left_response.image.resize((half_width, request.height))
-        right_image = right_response.image.resize((right_width, request.height))
+        try:
+            from core.regional_generator import generate_two_characters_same_frame
 
-        composite = Image.new("RGB", (request.width, request.height))
-        composite.paste(left_image, (0, 0))
-        composite.paste(right_image, (half_width, 0))
-        return ImageResponse(image=composite, seed=seed)
-
-    def generate(self, request: ImageRequest) -> ImageResponse:
-        split_prompts = self._split_two_character_prompt(request.prompt)
-        if split_prompts is not None:
-            return self._generate_two_character_composite(request, split_prompts)
-        return self._generate_single(request)
+            with self._lock:
+                with torch.inference_mode():
+                    self._ensure_lora_loaded(request.lora_path)
+                    left_full = self._build_prompt(left, style_to_use)
+                    right_full = self._build_prompt(right, style_to_use)
+                    negative_prompt = self._build_negative_prompt(
+                        request.negative_prompt, style_to_use
+                    )
+                    logger.info(
+                        f"Sinh regional 2 nhân vật cùng khung | "
+                        f"Steps={request.steps} | Guidance={guidance_scale} | "
+                        f"Style={style_to_use or 'default'}"
+                    )
+                    image, used_seed = generate_two_characters_same_frame(
+                        pipeline_runner=self,
+                        left_prompt=left_full,
+                        right_prompt=right_full,
+                        negative_prompt=negative_prompt,
+                        width=request.width,
+                        height=request.height,
+                        steps=request.steps,
+                        guidance_scale=guidance_scale,
+                        seed=request.seed,
+                    )
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGB")
+                return ImageResponse(image=image, seed=used_seed)
+        except Exception as e:
+            if os.environ.get("IMAGE_AI_REGIONAL_STRICT") == "1":
+                raise
+            logger.exception("Sinh regional 2 nhân vật thất bại (%s) — fallback sinh 1 lần bình thường.", e)
+            return None
+        finally:
+            if self.device != "mps" or self.settings.MPS_CLEAR_CACHE_AFTER_GENERATE:
+                vram_manager.clear_cache()
 
     def _generate_single(self, request: ImageRequest) -> ImageResponse:
 
