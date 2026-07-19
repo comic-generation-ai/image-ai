@@ -684,9 +684,18 @@ class PipelineRunner:
             raise ValueError(f"Steps must be between {self.settings.MIN_STEPS} and {self.settings.MAX_STEPS}")
 
     def generate(self, request: ImageRequest) -> ImageResponse:
-        two_char_result = self._try_generate_two_characters_regional(request)
-        if two_char_result is not None:
-            return two_char_result
+        # Regional 2-nhân-vật-cùng-khung ĐÃ BỎ (không gọi
+        # _try_generate_two_characters_regional nữa) — sau 6 lần thử kiến
+        # trúc khác nhau trên GPU thật (xem lịch sử đầy đủ trong docstring
+        # core/regional_generator.py), mỗi lần vá xong 1 lỗi lại lộ lỗi khác
+        # (hợp thể → chồng lấn → lệch góc máy → lệch tỷ lệ nghiêm trọng khiến
+        # 2 nhân vật nhìn như dính vào nhau ở panel thật). Quyết định: dừng
+        # đầu tư kỹ thuật vào việc nhét 2 nhân vật chung 1 khung, luôn đi qua
+        # _generate_single() — kể cả với prompt "on the left, X; on the
+        # right, Y" (SDXL vẫn tự xử lý được như 1 mô tả cảnh thông thường,
+        # không có regional control, chấp nhận chất lượng ở mức model gốc).
+        # Code trong regional_generator.py GIỮ LẠI (không xoá) để tham khảo
+        # nếu sau này quay lại hướng này bằng kỹ thuật khác (vd ControlNet).
         return self._generate_single(request)
 
     def _try_generate_two_characters_regional(
