@@ -35,9 +35,11 @@ services:
   #     - CELERY_BROKER_URL=${CELERY_BROKER_URL}
   #     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
   #     - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+  #     - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
   #   volumes:
   #     - ./proto:/app/proto
   #     - ./src:/app/src
+  #     - prometheus_multiproc:/tmp/prometheus_multiproc
   #   depends_on:
   #     - redis
   #     - minio
@@ -51,6 +53,9 @@ services:
   #     - CELERY_BROKER_URL=${CELERY_BROKER_URL}
   #     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
   #     - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+  #     - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
+  #   volumes:
+  #     - prometheus_multiproc:/tmp/prometheus_multiproc
   #   deploy:
   #     resources:
   #       reservations:
@@ -65,3 +70,7 @@ services:
 volumes:
   redis_data:
   minio_data:
+  # dùng chung giữa api-server và celery-worker khi 2 khối service ở trên
+  # được bật lại — bắt buộc để multiprocess Prometheus hoạt động đúng, xem
+  # PROMETHEUS_MULTIPROC_DIR trong .env.example
+  prometheus_multiproc:

@@ -930,6 +930,7 @@ class PipelineRunner:
                         f"Style={style_to_use or 'default'}"
                     )
                     prompt = self._build_prompt(request.prompt, style_to_use)
+                    logger.info(f"Final prompt: {prompt}")
                     negative_prompt = self._build_negative_prompt(
                         request.negative_prompt, style_to_use
                     )

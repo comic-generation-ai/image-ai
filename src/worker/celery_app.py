@@ -1,4 +1,8 @@
+import os
+
 from celery import Celery
+from celery.signals import celeryd_init, worker_process_shutdown
+
 from config.settings import get_settings
 
 settings = get_settings()
@@ -26,3 +30,30 @@ celery_app.conf.update(
     # Tránh nạp đè nhiều tác vụ sinh ảnh làm sập GPU
     worker_prefetch_multiplier=1
 )
+
+
+@celeryd_init.connect
+def _reset_prometheus_multiproc_dir(**kwargs):
+    """Xoá sạch PROMETHEUS_MULTIPROC_DIR khi tiến trình worker cha khởi động,
+    trước khi Celery fork các tiến trình con — tránh cộng dồn nhầm các file
+    .db còn sót lại từ lần chạy trước (worker bị kill/crash không kịp dọn)."""
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not multiproc_dir:
+        return
+    os.makedirs(multiproc_dir, exist_ok=True)
+    for name in os.listdir(multiproc_dir):
+        path = os.path.join(multiproc_dir, name)
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+@worker_process_shutdown.connect
+def _mark_prometheus_process_dead(pid, **kwargs):
+    """Dọn file metric của đúng tiến trình con vừa thoát — nếu không,
+    MultiProcessCollector phía api-server vẫn đọc file .db của pid đã chết và
+    cộng nhầm số liệu (đặc biệt sai với gauge multiprocess_mode="livesum")."""
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not multiproc_dir:
+        return
+    from prometheus_client import multiprocess
+    multiprocess.mark_process_dead(pid, path=multiproc_dir)
