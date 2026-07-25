@@ -6,8 +6,8 @@
 # bản mới nhất — bản mới này gọi torch.xpu (chỉ có từ torch ~2.4+) ngay lúc
 # import module, torch 2.1.0 không có attribute đó → AttributeError treo
 # ngay khi container start, tốn công GPU rebuild nhiều lần mới lộ ra.
-torch==2.12.0
-torchvision==0.27.0
+torch>=2.0.0
+torchvision>=0.16.0
 diffusers==0.38.0
 transformers>=4.36.0
 accelerate>=0.26.0

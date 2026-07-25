@@ -119,6 +119,8 @@ class PipelineRunner:
 
         elif torch.backends.mps.is_available():
             self.device = "mps"
+            # Tự động vô hiệu hoá giới hạn watermark bộ nhớ ảo của PyTorch MPS trên macOS
+            os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
             # fp16 trên MPS gây NaN khi VAE decode → ảnh đen (invalid value in cast)
             self.dtype = (
                 torch.float32
@@ -574,6 +576,9 @@ class PipelineRunner:
             return
         if self.is_sdxl:
             logger.warning("Compel chưa hỗ trợ SDXL dual-encoder — dùng prompt dạng text thuần")
+            return
+        if self.device == "mps":
+            logger.info("MPS: Tắt Compel đa-chunk để tránh phình tensor conditioning gây lỗi Metal single buffer (4.00 GiB)")
             return
 
         try:
