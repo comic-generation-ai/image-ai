@@ -1,82 +1,99 @@
 # Hướng dẫn Kiến trúc & Chuẩn hóa Production cho Dịch vụ Sinh ảnh (image-ai)
 
-Chào bạn, đây là tài liệu hướng dẫn bài bản, chuyên nghiệp và dễ hiểu nhất để xây dựng và tối ưu dịch vụ **Image AI (Stable Diffusion)** đạt chuẩn **Production-ready** (sẵn sàng chạy thực tế với tải trọng cao).
+Tài liệu hướng dẫn chuyên sâu về kiến trúc, tối ưu hóa và chuẩn hóa **Production-ready** cho dịch vụ **Image AI (Stable Diffusion)** trong hệ thống **ComicSystem**.
 
-Dịch vụ Sinh ảnh AI có đặc thù rất khác so với các dịch vụ Web/API truyền thống vì nó tiêu tốn **năng lượng tính toán cực kỳ lớn (GPU/VRAM)** và **thời gian xử lý lâu (vài giây tới hàng phút)**. Nếu không thiết kế đúng cách, hệ thống sẽ sập (`CUDA Out Of Memory`) ngay khi có từ 2-3 người dùng cùng lúc.
+Dịch vụ Sinh ảnh AI có đặc thù tiêu tốn **tài nguyên tính toán cực kỳ lớn (GPU/VRAM)** và **thời gian xử lý kéo dài (từ vài giây đến vài phút)**. Nếu không được thiết kế kiến trúc chuẩn hóa, dịch vụ sẽ lập tức quá tải hoặc sập do cạn kiệt bộ nhớ (`CUDA Out Of Memory` / `MPS OOM`) khi xuất hiện đồng thời từ 2-3 người dùng.
 
-Dưới đây là 7 cột mốc kiến trúc bạn cần nắm lòng và triển khai.
+Dưới đây là **9 cột mốc kiến trúc trọng tâm** được áp dụng trong dịch vụ `image-ai`.
 
 ---
 
 ## 1. Kiến trúc Bất đồng bộ & Hàng đợi (Asynchronous & Queue)
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> Nếu chạy sinh ảnh đồng bộ trực tiếp trên Web Server (FastAPI/gRPC), khi có nhiều request đồng thời, GPU sẽ cố gắng xử lý song song tất cả các request này. Kết quả là VRAM bị quá tải ngay lập tức và gây sập dịch vụ.
+> Nếu thực hiện sinh ảnh đồng bộ trực tiếp trên Web/gRPC Server, khi có nhiều request đồng thời, GPU sẽ cố gắng xử lý song song tất cả các request này. Kết quả là VRAM bị quá tải ngay lập tức, gây sập process toàn bộ dịch vụ.
 
 ### Giải pháp Production:
-*   **gRPC API Server (Dây chuyền tiếp nhận)**: Chỉ làm nhiệm vụ nhận yêu cầu từ Backend chính, ghi nhận tham số, sinh ra một `task_id` duy nhất và đẩy vào hàng đợi (Redis/Celery), sau đó trả về ngay lập tức cho client. Thời gian phản hồi chỉ dưới **50ms**.
-*   **Celery Worker (Dây chuyền xử lý)**: Chạy độc lập, chỉ rút từng tác vụ một từ hàng đợi ra để xử lý (`concurrency=1` trên mỗi GPU). Việc này đảm bảo GPU luôn chạy ở hiệu suất tối đa nhưng không bao giờ bị quá tải bộ nhớ.
+*   **gRPC API Server (Process Tiếp nhận)**: Tiếp nhận yêu cầu từ Orchestrator/Backend, thực hiện kiểm tra tham số (validation), áp dụng các quy tắc tự động điều chỉnh (heuristics), tạo `task_id` duy nhất và đẩy vào hàng đợi Redis/Celery. Trả về ngay lập tức cho client trong thời gian **< 50ms**.
+*   **Celery Worker (Process Xử lý GPU)**: Chạy độc lập với cấu hình tuần tự (`concurrency=1` trên từng GPU/Worker). Worker rút từng tác vụ một từ hàng đợi ra để xử lý, đảm bảo GPU luôn đạt hiệu suất cao nhất mà không bị quá tải bộ nhớ.
 
 ```mermaid
 graph LR
-    Orchestrator[Backend Orchestrator] -->|gRPC Request| gRPC[gRPC Server]
-    gRPC -->|1. Đẩy task vào hàng đợi| Redis[(Redis Broker)]
-    gRPC -->|2. Trả về Task ID ngay| Orchestrator
-    Redis -->|3. Rút tuần tự từng Task| Celery[Celery Worker GPU]
+    Orchestrator[Backend Orchestrator] -->|gRPC Request| gRPC[gRPC Server - port 50051]
+    gRPC -->|1. Đẩy taskAsync| Redis[(Redis Broker / Cache)]
+    gRPC -->|2. Trả Task ID ngay| Orchestrator
+    Redis -->|3. Rút tuần tự từng Task| Celery[Celery Worker GPU/MPS - concurrency=1]
     Celery -->|4. Sinh ảnh & Hậu kỳ| MinIO[(MinIO Storage)]
     Celery -->|5. Ghi kết quả SUCCESS| Redis
 ```
 
 ---
 
-## 2. Quản lý và Giải phóng VRAM (VRAM Management)
+## 2. Phân tách Process & Cờ Báo Sức Khỏe Worker (Worker Health Flag)
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> PyTorch có cơ chế giữ lại bộ nhớ đã cấp phát (caching) để tái sử dụng cho các lần sau. Tuy nhiên trong môi trường dùng chung, việc này làm cạn kiệt tài nguyên GPU nhanh chóng.
+> gRPC/FastAPI Server (`src/server.py`) và Celery Worker (`src/worker/tasks.py`) là **2 process Python độc lập**. Chúng không chia sẻ bộ nhớ (state) trực tiếp với nhau. Kiểm tra trực tiếp biến cục bộ của server process sẽ luôn báo sai trạng thái của worker.
 
 ### Giải pháp Production:
-*   **Tối ưu hóa Pipeline**: Sử dụng `enable_vae_slicing()` và `enable_vae_tiling()` từ thư viện `diffusers`. Cơ chế này chia nhỏ bức ảnh thành từng mảnh để giải mã (decode) thay vì decode cả cụm, giúp giảm VRAM cần thiết từ **12GB xuống còn 6-8GB** đối với SDXL mà chất lượng không đổi.
+*   Khi Celery Worker khởi tạo và warmup xong model Stable Diffusion (`@worker_process_init.connect`), worker tự động ghi cờ trạng thái vào Redis:
+    ```python
+    WORKER_READY_KEY = "image_ai:worker_ready"
+    redis_cache_manager.client.set(WORKER_READY_KEY, "1")
+    ```
+*   Endpoint kiểm tra sức khỏe HTTP `/healthz` trên FastAPI (port 8000) truy vấn trực tiếp cờ Redis này để phản ánh chính xác trạng thái sẵn sàng thực tế của GPU Worker.
+
+---
+
+## 3. Quản lý và Giải phóng VRAM/RAM (VRAM Management & Memory Tuning)
+
+> [!IMPORTANT]
+> **Tại sao cần thiết?**
+> PyTorch giữ lại bộ nhớ đã cấp phát (caching) để tái sử dụng. Trên GPU CUDA hoặc Apple Silicon MPS (Mac 8GB), nếu không giải phóng đúng cách hoặc dùng sai kiểu dữ liệu (fp32/fp16), hệ thống sẽ lập tức rơi vào swap-thrashing hoặc lỗi tràn số NaN (ảnh ra đen/rác).
+
+### Giải pháp Production:
+*   **Tối ưu hóa Pipeline**: Sử dụng `enable_vae_slicing()` và `enable_vae_tiling()` từ `diffusers` để chia nhỏ bức ảnh thành từng mảnh khi decode, giúp giảm bộ nhớ VRAM cần thiết từ **12GB xuống còn 6-8GB** đối với SDXL.
+*   **Tối ưu hóa Apple Silicon (Mac MPS)**:
+    *   Sử dụng VAE decode trên CPU (float32) qua cấu hình `MPS_DECODE_ON_CPU=True` và `MPS_VAE_FP32=True` để tránh hiện tượng NaN decode khi UNet chạy fp16.
+    *   Dùng `torch.Generator` trên CPU (`MPS_USE_CPU_GENERATOR=True`) đảm bảo tính ổn định của hạt giống random (seed).
 *   **Thu dọn bộ nhớ chủ động**:
-    Sau mỗi Task sinh ảnh hoàn tất (kể cả lỗi), Celery Worker bắt buộc phải gọi dọn dẹp:
+    Sau mỗi task hoàn tất (hoặc bị hủy), hệ thống thực hiện dọn dẹp bộ nhớ:
     ```python
     import gc
     import torch
 
     gc.collect()
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()  # Giải phóng bộ nhớ CUDA
-    elif torch.backends.mps.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available() and settings.MPS_CLEAR_CACHE_AFTER_GENERATE:
         import torch.mps
-        torch.mps.empty_cache()   # Giải phóng bộ nhớ trên Mac M1/M2/M3
+        torch.mps.empty_cache()
     ```
 
 ---
 
-## 3. Chiến lược Lưu trữ Trực tiếp trên RAM (In-Memory Storage)
+## 4. Chiến lược Lưu trữ Trực tiếp từ RAM (In-Memory Storage & Presigned URLs)
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> Việc ghi ảnh ra đĩa cứng của server (`/tmp/image.jpg`) rồi đọc lại để upload lên Object Storage là một phản mẫu (Anti-pattern). Ghi đĩa gây nghẽn cổ chai I/O, làm giảm tuổi thọ ổ cứng SSD của server và gây khó khăn khi scale ứng dụng ra nhiều container (do đĩa cứng bị cô lập).
+> Ghi ảnh tạm ra đĩa cứng của server (`/tmp/image.jpg`) rồi đọc lại để upload là phản mẫu (Anti-pattern) gây nghẽn cổ chai I/O, giảm tuổi thọ SSD và không thể mở rộng (scale) đa container.
 
 ### Giải pháp Production:
-*   Giữ bức ảnh trong RAM dưới dạng đối tượng PIL Image.
-*   Chuyển đổi thành luồng byte nhị phân (`io.BytesIO`) và upload thẳng lên MinIO/S3 qua mạng.
-*   Trả về **Presigned URL** (đường dẫn tạm thời có thời hạn — `.env` hiện tại đặt
-    `PRESIGNED_TTL_SECONDS=604800` tức 7 ngày; mặc định code nếu không set qua `.env` là 3600s/1
-    giờ) để Frontend hiển thị thẳng cho người dùng mà không cần đi qua Backend trung gian.
-
+*   Giữ bức ảnh hoàn chỉnh trong RAM dưới dạng đối tượng `PIL.Image`.
+*   Encode thành luồng byte nhị phân (`io.BytesIO`) và upload trực tiếp lên MinIO Bucket qua mạng.
+*   Tạo và trả về **Presigned URL** có thời hạn cấu hình (`IMAGE_AI_PRESIGNED_TTL_SECONDS`, mặc định 7 ngày) cho Frontend hiển thị trực tiếp:
 ```python
 import io
 from PIL import Image
 
-# Lưu vào RAM dạng Bytes
 img_byte_arr = io.BytesIO()
 image.save(img_byte_arr, format='JPEG', quality=95)
 img_byte_arr.seek(0)
 
-# Upload trực tiếp
 minio_client.put_object(
-    bucket_name="comic-images",
-    object_name="filename.jpg",
+    bucket_name="lvtn",
+    object_name="comic_abcd1234.jpg",
     data=img_byte_arr,
     length=len(img_byte_arr.getvalue()),
     content_type='image/jpeg'
@@ -85,64 +102,80 @@ minio_client.put_object(
 
 ---
 
-## 4. Prompt Result Caching (Tránh lãng phí tài nguyên GPU)
+## 5. Prompt Result Caching & Anti-Thundering Herd Lock
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> Trong truyện tranh, nhiều nhân vật hoặc bối cảnh sẽ có prompt giống hệt nhau ở các khung hình khác nhau. Việc chạy mô hình AI để vẽ lại một bức ảnh giống hệt là cực kỳ lãng phí tiền bạc và thời gian.
+> Các khung truyện tranh thường sử dụng lại prompt hoặc hạt giống ngẫu nhiên. Việc sinh lại một bức ảnh giống hệt tiêu tốn tài nguyên GPU một cách lãng phí. Đồng thời, khi nhiều request cùng cache-miss một lúc, cần tránh việc GPU sinh trùng lặp.
 
 ### Giải pháp Production:
-*   Băm (Hash MD5) toàn bộ tham số ảnh hưởng output: prompt, seed, caption, size, steps, model,
-    guidance, lora, style, reference_image_url, format (xem `redis_cache.generate_hash_key`;
-    version hiện tại `v6` qua `.env`, mặc định code `v3` nếu không set).
-*   Lưu kết quả link ảnh MinIO vào Redis Cache với khóa là mã hash trên (`.env` hiện tại đặt
-    `REDIS_CACHE_TTL_SECONDS=604800` tức 7 ngày; mặc định code nếu không set là 3600s/1 giờ).
-*   Khi có request mới, kiểm tra Redis trước. Nếu trúng cache (Cache Hit), trả về link ảnh ngay lập tức (**0 giây xử lý GPU**).
-*   Chống thundering herd: khi nhiều request cùng cache-miss 1 hash key, chỉ 1 worker được cấp
-    lock để render — các request còn lại chờ rồi đọc lại cache thay vì render trùng.
+*   **Deep Hashing**: Mã hóa MD5 tổng hợp từ **13 tham số** ảnh hưởng trực tiếp tới đầu ra:
+    `prompt`, `seed`, `caption_text`, `width`, `height`, `steps`, `model_id` (cache signature), `guidance_scale`, `lora_id` (signature), `output_image_format`, `jpeg_quality`, `png_compress_level`, `style`, `reference_image_url`.
+    Version hash key được quản lý qua biến môi trường `IMAGE_AI_CACHE_KEY_VERSION` (hiện tại `v6`).
+*   **Chống Thundering Herd**: Khi xảy ra cache miss đồng thời cho cùng một mã hash, worker sử dụng lock phân tán trong Redis (`redis_cache.acquire_generation_lock`). Chỉ 1 worker được cấp phép render, các request khác tạm dừng và poll lại kết quả cache vừa được tạo.
 
 ---
 
-## 5. Quản lý Cấu hình Tập trung (Pydantic Settings)
+## 6. Chiến lược Ảnh Tham Chiếu Sạch (Clean Reference Pipeline) cho IP-Adapter
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> Việc gọi `os.getenv` trực tiếp ở khắp nơi khiến ứng dụng khó quản lý, dễ lỗi chính tả tên biến môi trường và không tự động ép kiểu (ví dụ: port đọc từ env sẽ là string `"50051"` thay vì int `50051`).
+> Khi chèn trực tiếp bong bóng thoại/văn bản tiếng Việt vào ảnh của panel 1 rồi dùng bức ảnh đó làm `reference_image_url` cho IP-Adapter ở các panel 2-4, CLIP vision encoder sẽ "học" cả các nét chữ rác, dẫn tới các panel sau bị lỗi biến dạng chữ hoặc sinh chữ giả bẩn trên nhân vật.
 
 ### Giải pháp Production:
-*   Sử dụng thư viện `pydantic-settings` để định nghĩa một file cấu hình duy nhất `src/config/settings.py`.
-*   Tự động ép kiểu dữ liệu (chuyển `"True"` thành `True`, `"50051"` thành `50051`).
-*   Có giá trị mặc định rõ ràng cho môi trường local để dev chỉ cần chạy luôn mà không bắt buộc tạo file `.env`.
+*   Tách biệt trách nhiệm hậu kỳ: Dịch vụ sinh ảnh mặc định giữ ảnh **sạch 100%** không chèn caption (`IMAGE_AI_CAPTION_RENDER_ENABLED=false`).
+*   Bức ảnh sạch được upload lên MinIO và làm đầu vào tham chiếu chuẩn (pristine reference) cho IP-Adapter.
+*   Nội dung lời thoại (`PanelResult.caption_vi`) được giữ nguyên trong metadata để Frontend hoặc layer UI tự render đè lên ảnh khi hiển thị cho người đọc.
 
 ---
 
-## 6. Hủy Tác vụ (Task Revocation / Cancelling)
+## 7. Khung Cảnh Đa Nhân Vật: Regional Diffusion (Isolation Latents)
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> Người dùng có thể nhấn nút "Hủy sinh ảnh" hoặc tắt trình duyệt khi đang đợi trong hàng đợi. Nếu không có cơ chế hủy, GPU vẫn tiếp tục sinh ra bức ảnh đó và làm nghẽn hàng đợi của những người dùng khác.
+> Khi sinh 1 khung tranh chứa 2 nhân vật (ví dụ: Rùa và Thỏ) bằng text prompt chung, cơ chế self-attention toàn cục của UNet sẽ làm tan chảy (hợp thể) các đặc trưng identity của 2 nhân vật vào nhau (ví dụ: thỏ mang mai rùa).
 
 ### Giải pháp Production:
-*   Cung cấp API `CancelTask(task_id)` qua gRPC.
-*   Gọi lệnh thu hồi nhiệm vụ của Celery theo 2 bước: `revoke(task_id, terminate=False)` trước để
-    chặn task chưa chạy, sau đó `revoke(task_id, terminate=True)` để dừng sớm nếu đã bắt đầu chạy.
-*   Signal `task_revoked` kích hoạt dọn VRAM ngay (`vram_manager.clear_cache()`), không đợi task
-    kết thúc tự nhiên.
-*   **Giới hạn thật đã gặp**: worker chạy pool `solo` (bắt buộc cho GPU/MPS tuần tự) **không hỗ
-    trợ dừng job đang chạy giữa chừng** (`NotImplementedError: TaskPool does not implement
-    kill_job`) — `revoke(terminate=True)` chỉ dừng được task chưa bắt đầu, task đang generate dở
-    vẫn chạy hết tự nhiên. Cần hardening riêng nếu muốn cancel thật giữa chừng (theo dõi
-    `docs/TODO.md` mục 4.2b).
+*   Đã nghiên cứu và triển khai module `src/core/regional_generator.py` dựa trên giải pháp **Physical Crop Tiling + Linear Feather Blending** trên SDXL Latents.
+*   Chia latent space thành 2 tensor vật lý riêng biệt (nửa trái / nửa phải) với vùng đệm overlap ~16%.
+*   Đánh dấu tọa độ micro-conditioning (`crops_coords_top_left` và `target_size`) cho từng crop để UNet nhận biết chính xác vị trí không gian mà không làm dính identity của 2 nhân vật.
 
 ---
 
-## 7. Giám sát Sức khỏe & Hiệu năng (Monitoring & Health Check)
+## 8. Quản lý Cấu hình Tập trung (Pydantic Settings Discipline)
+
 > [!IMPORTANT]
 > **Tại sao cần thiết?**
-> Khi chạy thực tế, container có thể bị treo hoặc GPU bị quá nhiệt. Chúng ta cần các chỉ số thời gian thực để hệ thống tự động khởi động lại (K8s/Docker Auto-heal).
+> Việc đọc `os.getenv` phân tán gây khó kiểm soát, thiếu ép kiểu dữ liệu và dễ lỗi khi Celery worker được gọi từ vị trí thư mục làm việc (cwd) khác với thư mục gốc dự án.
 
 ### Giải pháp Production:
-*   **FastAPI Health Server**: Chạy song song trên một luồng phụ (daemon thread) cung cấp endpoint `/healthz` để kiểm tra kết nối giữa Service với Redis và MinIO.
-*   **Prometheus Metrics**: Cung cấp endpoint `/metrics` đo lượng VRAM còn lại, nhiệt độ GPU, số lượng tác vụ đang chờ trong hàng đợi (Queue Length) và thời gian sinh ảnh trung bình.
-*   **Lưu ý 2 process riêng biệt**: gRPC/FastAPI server (`server.py`) và Celery worker chạy 2 process
-    Python khác nhau — object Python (kể cả singleton `pipeline_runner`) **không share state trực
-    tiếp** giữa 2 process. Trường `pipeline_ready` trong `/healthz` vì vậy phải đọc qua cờ Redis
-    (`image_ai:worker_ready`, worker tự ghi sau khi warmup xong) thay vì check biến cục bộ trong
-    process server — nếu không sẽ luôn báo `false` dù worker đã sẵn sàng thật.
+*   Sử dụng Pydantic Settings trong `src/config/settings.py` với tiền tố biến môi trường `IMAGE_AI_*`.
+*   **Neo tuyệt đối file `.env`**: Đường dẫn file `.env` được neo cố định theo vị trí của file `settings.py`:
+    ```python
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parent.parent.parent / ".env"),
+        env_file_encoding="utf-8",
+        env_prefix="IMAGE_AI_",
+        extra="ignore",
+    )
+    ```
+    Đảm bảo Celery worker dù khởi chạy từ `src/` vẫn đọc đúng toàn bộ biến môi trường của hệ thống.
+
+---
+
+## 9. Giám sát Hiệu năng (Prometheus Metrics & Safety Policy)
+
+> [!IMPORTANT]
+> **Tại sao cần thiết?**
+> Hệ thống sinh ảnh trong môi trường Production cần đo lường được tỷ lệ cache hit, thời gian xử lý thực tế trên GPU, số lượng task bị chặn bởi bộ lọc an toàn NSFW để chủ động hạ tầng.
+
+### Giải pháp Production:
+*   **Prometheus Exporter**: Chạy tại cổng `9107` thu thập các chỉ số real-time:
+    *   `image_requests_total`: Tổng số request (phân loại theo status `SUCCESS`, `FAILED`, `CANCELLED`).
+    *   `cache_hit_total` & `cache_miss_total`: Tỷ lệ hiệu quả của bộ nhớ cache.
+    *   `task_duration_seconds`: Histogram thời gian xử lý sinh ảnh thực tế (phân biệt cached / non-cached).
+    *   `active_gpu_tasks`: Số lượng task đang tính toán trực tiếp trên GPU.
+    *   `safety_blocks_total`: Số lượng ảnh bị chặn do nội dung NSFW (`Falconsai/nsfw_image_detection`).
+*   **Auto-tuning & Heuristics**: gRPC Servicer tự động kiểm tra:
+    *   Điều chỉnh `steps` lên mặc định `20` nếu client truyền `< 10` đối với model non-turbo (như Dreamshaper 8).
+    *   Tự động nâng số bước lặp (step boost) khi phát hiện cảnh có từ 3 chủ thể trở lên.
