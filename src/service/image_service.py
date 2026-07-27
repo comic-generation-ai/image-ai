@@ -36,15 +36,30 @@ class ImageGenerationService(image_generation_pb2_grpc.ImageGenerationServiceSer
         logger.info(f"Đã nhận yêu cầu sinh ảnh gRPC từ Orchestrator | Prompt: '{request.prompt[:30]}...'")
         
         try:
-            width = request.width if request.width > 0 else settings.DEFAULT_WIDTH
-            height = request.height if request.height > 0 else settings.DEFAULT_HEIGHT
+            req_width = request.width if request.width > 0 else settings.DEFAULT_WIDTH
+            req_height = request.height if request.height > 0 else settings.DEFAULT_HEIGHT
+            
+            model_id_lower = settings.MODEL_ID.lower()
+            is_sdxl = "xl" in model_id_lower
+            is_fast_model = "turbo" in model_id_lower or "lcm" in model_id_lower
+
+            # Tự động bảo vệ độ phân giải theo loại Model (Smart Resolution Guard)
+            # SDXL được huấn luyện chuẩn 1024x1024; nếu client truyền width/height < 768 (như 512x512)
+            # ảnh sẽ bị nhòe/méo hình nghiêm trọng. Tự động nâng lên DEFAULT_WIDTH/DEFAULT_HEIGHT.
+            if is_sdxl and (req_width < 768 or req_height < 768):
+                target_width = max(req_width, settings.DEFAULT_WIDTH)
+                target_height = max(req_height, settings.DEFAULT_HEIGHT)
+                logger.warning(
+                    f"Model SDXL ({settings.MODEL_ID}) nhận yêu cầu độ phân giải {req_width}x{req_height} quá thấp (< 768). "
+                    f"Tự động điều chỉnh lên {target_width}x{target_height} để bảo vệ chất lượng ảnh."
+                )
+                width = target_width
+                height = target_height
+            else:
+                width = req_width
+                height = req_height
             
             # Tự động tối ưu số bước lặp (steps) cho các model thường (như dreamshaper-8)
-            # Nếu client yêu cầu steps quá nhỏ (< 10) mà model không phải loại ít-step
-            # (turbo/LCM vốn chạy chuẩn ở 4-6 steps), ghi đè bằng DEFAULT_STEPS để
-            # đảm bảo chất lượng ảnh không bị xấu/nhiễu.
-            model_id_lower = settings.MODEL_ID.lower()
-            is_fast_model = "turbo" in model_id_lower or "lcm" in model_id_lower
             requested_steps = request.num_inference_steps
             if requested_steps > 0:
                 if not is_fast_model and requested_steps < 10:
