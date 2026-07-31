@@ -7,7 +7,7 @@ from worker.celery_app import celery_app
 from core.pipeline_runner import pipeline_runner, ImageRequest
 from core.vram_manager import vram_manager
 from core.safety_checker import safety_checker
-from utils.image_processing import add_caption_to_comic, enhance_comic_image
+from utils.image_processing import enhance_comic_image
 from utils.image_validation import validate_generated_image
 from storage.minio_client import minio_storage_client
 from cache.redis_cache import redis_cache_manager
@@ -75,13 +75,11 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
     hash_key = redis_cache_manager.generate_hash_key(
         prompt=prompt,
         seed=actual_seed,
-        caption_text=caption_text if settings.CAPTION_RENDER_ENABLED else "",
         width=width,
         height=height,
         steps=steps,
         model_id=pipeline_runner.cache_signature,
         guidance_scale=pipeline_runner.default_guidance_scale,
-        lora_id=pipeline_runner.lora_signature,
         output_image_format=settings.OUTPUT_IMAGE_FORMAT.lower(),
         jpeg_quality=settings.JPEG_QUALITY,
         png_compress_level=settings.PNG_COMPRESS_LEVEL,
@@ -107,7 +105,8 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
     cache_miss_total.inc()
 
     # Thundering herd protection: chỉ 1 worker render cho cùng 1 hash key
-    lock_acquired = redis_cache_manager.acquire_generation_lock(hash_key)
+    lock_token = task_id
+    lock_acquired = redis_cache_manager.acquire_generation_lock(hash_key, lock_token=lock_token)
     if not lock_acquired:
         for _ in range(20):
             time.sleep(0.25)
@@ -124,7 +123,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
                     "cached": True,
                     "duration_seconds": duration
                 }
-        lock_acquired = redis_cache_manager.acquire_generation_lock(hash_key)
+        lock_acquired = redis_cache_manager.acquire_generation_lock(hash_key, lock_token=lock_token)
         if not lock_acquired:
             raise RuntimeError("Ảnh tương tự đang được sinh; vui lòng thử lại sau vài giây")
 
@@ -158,15 +157,7 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
             raise ValueError(
                 f"Bức ảnh bị chặn bởi Safety Checker (nsfw_score={safety_result.nsfw_score:.4f})"
             )
-
-        # Hậu kỳ Pillow: mặc định trả ảnh sạch — caption do FE render bên dưới ảnh
-        # (PanelResult.caption_vi đã có sẵn trong contract orchestrator).
-        # Ảnh sạch cũng là reference sạch cho IP-Adapter (hết lỗi sinh chữ rác).
-        raw_image = enhance_comic_image(raw_image)
-        if settings.CAPTION_RENDER_ENABLED:
-            processed_image = add_caption_to_comic(image=raw_image, text=caption_text)
-        else:
-            processed_image = raw_image
+        processed_image = enhance_comic_image(raw_image)
 
         # Tải ảnh lên MinIO Object Storage
         image_format = settings.OUTPUT_IMAGE_FORMAT.lower()
@@ -237,4 +228,4 @@ def generate_image_task(self, prompt: str, width: int, height: int, seed: int, s
         if pipeline_runner.device != "mps" or settings.MPS_CLEAR_CACHE_AFTER_GENERATE:
             vram_manager.clear_cache()
         if lock_acquired:
-            redis_cache_manager.release_generation_lock(hash_key)
+            redis_cache_manager.release_generation_lock(hash_key, lock_token=lock_token)

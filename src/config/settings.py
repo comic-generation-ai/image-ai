@@ -171,24 +171,8 @@ class Settings(BaseSettings):
         default=2048,
         description="Kích thước file tối thiểu sau encode (phát hiện upload rỗng).",
     )
-    LORA_ENABLED: bool = Field(default=False, description="Enable default LoRA adapter")
-    LORA_PATH: str = Field(default="", description="Path to default LoRA safetensors file or directory")
-    LORA_ADAPTER_NAME: str = Field(default="comic_style", description="Adapter name for default LoRA")
-    LORA_SCALE: float = Field(default=0.85, description="Default LoRA adapter weight")
-    LORA_TRIGGER_WORDS: str = Field(default="", description="Trigger words prepended to prompts")
-    LORA_STRICT_COMPATIBILITY: bool = Field(
-        default=True,
-        description="Fail startup/generation when the configured LoRA format does not match the pipeline",
-    )
-
+    
     # Post-processing Settings
-    CAPTION_RENDER_ENABLED: bool = Field(
-        default=False,
-        description=(
-            "Chèn caption vào ảnh (legacy). Mặc định tắt: FE render caption dưới ảnh "
-            "(PanelResult.caption_vi), ảnh sạch làm reference IP-Adapter không lỗi chữ rác."
-        ),
-    )
     COMIC_POSTPROCESS_ENABLED: bool = Field(default=True, description="Enhance generated image sharpness and color")
     SHARPEN_RADIUS: float = Field(default=1.1, description="Unsharp mask radius")
     SHARPEN_PERCENT: int = Field(default=135, description="Unsharp mask strength")

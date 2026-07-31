@@ -15,7 +15,6 @@ celery_app = Celery(
     include=["worker.tasks"] # Khai báo danh sách các file chứa task
 )
 
-# Cấu hình Celery tối ưu hóa
 celery_app.conf.update(
     task_serializer=settings.CELERY_TASK_SERIALIZER,
     result_serializer=settings.CELERY_RESULT_SERIALIZER,

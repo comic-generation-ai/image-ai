@@ -7,7 +7,6 @@ from logger.config import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-
 @dataclass(slots=True)
 class SafetyResult:
     is_safe: bool

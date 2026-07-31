@@ -24,7 +24,6 @@ except ImportError:
 
 from config.settings import get_settings
 from logger.config import get_logger
-from core.lora_loader import lora_loader
 from core.vram_manager import vram_manager
 
 logger = get_logger(__name__)
@@ -41,7 +40,6 @@ class ImageRequest:
         steps: The number of steps to use for the image generation.
         guidance_scale: The guidance scale to use for the image generation.
         negative_prompt: The negative prompt to use for the image generation.
-        lora_path: The path to the lora to use for the image generation.
     """
     prompt: str
     width: int = 1024
@@ -51,7 +49,6 @@ class ImageRequest:
     steps: int = 4
     guidance_scale: float | None = None
     negative_prompt: str = ""
-    lora_path: str | None = None
     style: str = ""
 
 
@@ -178,42 +175,8 @@ class PipelineRunner:
         )
         return (
             f"{self.model_id}|comic_style={self.settings.COMIC_STYLE_ENABLED}|"
-            f"style={style_suffix}|lora={self.lora_signature}|"
+            f"style={style_suffix}|"
             f"ip_adapter={self.settings.IP_ADAPTER_ENABLED}:{self.settings.IP_ADAPTER_SCALE}"
-        )
-
-    @property
-    def lora_signature(self) -> str:
-        if not self.settings.LORA_ENABLED:
-            return "disabled"
-        return (
-            f"path={self._resolve_lora_path()}|adapter={self.settings.LORA_ADAPTER_NAME}|"
-            f"scale={self.settings.LORA_SCALE}|trigger={self.settings.LORA_TRIGGER_WORDS}"
-        )
-
-    def _resolve_lora_path(self, lora_path: str | None = None) -> str:
-        raw_path = (lora_path or self.settings.LORA_PATH or "").strip()
-        if not raw_path:
-            return ""
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = Path(self.settings.BASE_DIR) / path
-        return str(path)
-
-    def _ensure_lora_loaded(self, lora_path: str | None = None) -> None:
-        if not self.settings.LORA_ENABLED and not lora_path:
-            return
-
-        resolved_path = self._resolve_lora_path(lora_path)
-        if not resolved_path:
-            raise ValueError("LORA_ENABLED=true nhưng IMAGE_AI_LORA_PATH đang rỗng")
-
-        self.pipeline = lora_loader.load_lora(
-            pipeline=self.pipeline,
-            lora_path=resolved_path,
-            adapter_name=self.settings.LORA_ADAPTER_NAME,
-            adapter_weight=self.settings.LORA_SCALE,
-            strict_compatibility=self.settings.LORA_STRICT_COMPATIBILITY,
         )
 
     _MJ_FLAG_PATTERN = re.compile(r"--\w+\s+\S+")
@@ -255,11 +218,6 @@ class PipelineRunner:
         clean_prompt = self._strip_midjourney_flags(clean_prompt)
         style_to_use = (style or parsed_style or "").strip().lower()
 
-        # Chỉ chèn trigger words khi LoRA thực sự bật — nếu không sẽ phí ngân sách
-        # ký tự cho từ khoá vô nghĩa với base model (vd "EldritchComicsXL").
-        trigger_words = self.settings.LORA_TRIGGER_WORDS.strip() if self.settings.LORA_ENABLED else ""
-        if trigger_words:
-            clean_prompt = f"{trigger_words}, {clean_prompt}" if clean_prompt else trigger_words
         if not self.settings.COMIC_STYLE_ENABLED:
             return self._truncate_for_clip(clean_prompt)
 
@@ -562,9 +520,6 @@ class PipelineRunner:
 
         self._optimize_pipeline()
         self._configure_mps_precision()
-        with torch.inference_mode():
-            self._ensure_lora_loaded()
-            
         self._init_compel()
 
         logger.info("Pipeline initialized successfully")
@@ -670,7 +625,7 @@ class PipelineRunner:
         if torch.isnan(latents).any() or torch.isinf(latents).any():
             raise ValueError(
                 "Latent chứa NaN/Inf sau bước diffusion (UNet fp16 trên MPS). "
-                "Thử IMAGE_AI_MPS_TURBO_GUIDANCE_SCALE=0, tắt LoRA, hoặc model nhẹ hơn."
+                "Thử IMAGE_AI_MPS_TURBO_GUIDANCE_SCALE=0 hoặc đổi sang model nhẹ hơn."
             )
         scaling = getattr(vae.config, "scaling_factor", 0.13025)
         with torch.inference_mode():
@@ -862,7 +817,6 @@ class PipelineRunner:
 
             with self._lock:
                 with torch.inference_mode():
-                    self._ensure_lora_loaded(request.lora_path)
                     left_full = self._build_prompt(left, style_to_use)
                     right_full = self._build_prompt(right, style_to_use)
                     negative_prompt = self._build_negative_prompt(
@@ -908,8 +862,6 @@ class PipelineRunner:
         with self._lock:
             try:
                 with torch.inference_mode():
-                    self._ensure_lora_loaded(request.lora_path)
-
                     seed = request.seed
                     if seed == -1:
                         seed = int(torch.randint(0, 2147483647, (1,)).item())
