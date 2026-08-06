@@ -388,16 +388,24 @@ class PipelineRunner:
         )
         return candidate
 
-    def _build_negative_prompt(self, negative_prompt: str, style: str = "") -> str:
+    def _build_negative_prompt(self, negative_prompt: str, style: str = "", prompt: str = "") -> str:
         style_to_use = (style or "").strip().lower()
         if style_to_use in STYLE_PRESETS:
             default_neg = STYLE_PRESETS[style_to_use]["negative"]
         else:
             default_neg = self.settings.DEFAULT_NEGATIVE_PROMPT
 
+        extra_negatives = []
+        prompt_lower = (prompt or "").lower()
+        if ("boy" in prompt_lower or "man" in prompt_lower or "male" in prompt_lower) and (
+            "girl" in prompt_lower or "woman" in prompt_lower or "female" in prompt_lower
+        ):
+            # Ngăn SDXL tự sao chép giới tính nhân vật nữ (vẽ thành 2 bé gái) khi cảnh có cả nam và nữ
+            extra_negatives.append("two girls, 2girls, female only, two boys, 2boys, male only, cloned characters, duplicated characters")
+
         parts = [
             value.strip()
-            for value in [negative_prompt, default_neg]
+            for value in [negative_prompt, default_neg] + extra_negatives
             if value and value.strip()
         ]
         # Negative prompt cũng bị giới hạn CLIP 77 token như prompt dương —
@@ -517,6 +525,8 @@ class PipelineRunner:
             logger.info("CUDA: model CPU offload enabled")
         else:
             self.pipeline.to(self.device)
+            if self.is_sdxl:
+                self.pipeline.vae.to(dtype=torch.float32)
 
         self._optimize_pipeline()
         self._configure_mps_precision()
@@ -889,7 +899,7 @@ class PipelineRunner:
                     prompt = self._build_prompt(request.prompt, style_to_use)
                     logger.info(f"Final prompt: {prompt}")
                     negative_prompt = self._build_negative_prompt(
-                        request.negative_prompt, style_to_use
+                        request.negative_prompt, style_to_use, request.prompt
                     )
 
                     reference_image = None
