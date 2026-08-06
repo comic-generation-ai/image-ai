@@ -276,6 +276,7 @@ class PipelineRunner:
         three_char_match = self._THREE_CHARACTER_PATTERN.match(clean_prompt)
         two_char_match = None if three_char_match else self._TWO_CHARACTER_PATTERN.match(clean_prompt)
 
+        has_explicit_positions = True
         if three_char_match:
             blocks = [
                 ("left", three_char_match.group("left")),
@@ -287,6 +288,14 @@ class PipelineRunner:
                 ("left", two_char_match.group("left")),
                 ("right", two_char_match.group("right")),
             ]
+        elif ";" in clean_prompt:
+            parts = [p.strip() for p in clean_prompt.split(";") if p.strip()]
+            if len(parts) >= 2:
+                labels = ["left", "right"] if len(parts) == 2 else ["left", "center", "right"]
+                blocks = list(zip(labels, parts[:len(labels)]))
+                has_explicit_positions = False
+            else:
+                blocks = None
         else:
             blocks = None
 
@@ -328,7 +337,7 @@ class PipelineRunner:
 
         def _build() -> str:
             parts = [
-                f"{preposition_by_label[label]} the {label}, " + ", ".join([identity] + extra)
+                (f"{preposition_by_label[label]} the {label}, " if has_explicit_positions else "") + ", ".join([identity] + extra)
                 for label, identity, extra in parsed
             ]
             return "; ".join(parts)
@@ -353,7 +362,7 @@ class PipelineRunner:
             "cả các tag nhận diện gộp lại cũng đã vượt — cắt bớt cuối tag cuối cùng."
         )
         identity_parts = [
-            f"{preposition_by_label[label]} the {label}, {identity}" for label, identity, _ in parsed
+            (f"{preposition_by_label[label]} the {label}, " if has_explicit_positions else "") + identity for label, identity, _ in parsed
         ]
         candidate = "; ".join(identity_parts)
         if _fits(candidate):
@@ -364,9 +373,10 @@ class PipelineRunner:
             prefix += "; "
         last_label, last_identity, _ = parsed[-1]
         words = last_identity.split()
-        while words and not _fits(prefix + f"{preposition_by_label[last_label]} the {last_label}, " + " ".join(words)):
+        last_prefix = (f"{preposition_by_label[last_label]} the {last_label}, " if has_explicit_positions else "")
+        while words and not _fits(prefix + last_prefix + " ".join(words)):
             words = words[:-1]
-        last_part = f"{preposition_by_label[last_label]} the {last_label}, " + " ".join(words)
+        last_part = last_prefix + " ".join(words)
         return (prefix + last_part).strip()
 
     def _truncate_for_clip(self, text: str) -> str:
