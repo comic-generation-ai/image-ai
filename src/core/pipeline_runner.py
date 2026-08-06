@@ -525,8 +525,6 @@ class PipelineRunner:
             logger.info("CUDA: model CPU offload enabled")
         else:
             self.pipeline.to(self.device)
-            if self.is_sdxl:
-                self.pipeline.vae.to(dtype=torch.float32)
 
         self._optimize_pipeline()
         self._configure_mps_precision()
