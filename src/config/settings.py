@@ -1,9 +1,25 @@
 """ Config Settings for Comic System (image-ai)."""
 
+import os
 from functools import lru_cache
-from pydantic_settings import BaseSettings,SettingsConfigDict
-from pydantic import Field
 from pathlib import Path
+
+from dotenv import load_dotenv
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ENV_FILE_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
+
+
+def load_environment_file(env_file: str | Path | None = None) -> Path:
+    """Load variables from the project .env file into os.environ for local runs."""
+    env_path = Path(env_file or ENV_FILE_PATH)
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
+    return env_path
+
+
+load_environment_file(ENV_FILE_PATH)
 
 
 class Settings(BaseSettings):
@@ -194,7 +210,7 @@ class Settings(BaseSettings):
     # import được package worker.*, nhưng .env nằm ở project root; nếu để đường dẫn
     # tương đối thì Settings sẽ âm thầm bỏ qua .env và dùng default cứng trong code.
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parent.parent.parent / ".env"),
+        env_file=str(ENV_FILE_PATH),
         env_file_encoding="utf-8",
         env_prefix="IMAGE_AI_",
         extra="ignore",
