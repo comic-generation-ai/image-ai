@@ -1,17 +1,14 @@
 # PyTorch and Core AI
-# Ghim đúng version đã verify chạy ổn định (Mac dev + GPU cloud cả session) —
-# base image Docker (pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime) cố định
-# sẵn torch 2.1.0, và "torch>=2.0.0" (không giới hạn trên) không ép pip nâng
-# cấp vì 2.1.0 đã thoả điều kiện. Trong khi đó "diffusers>=0.25.0" luôn cài
-# bản mới nhất — bản mới này gọi torch.xpu (chỉ có từ torch ~2.4+) ngay lúc
-# import module, torch 2.1.0 không có attribute đó → AttributeError treo
-# ngay khi container start, tốn công GPU rebuild nhiều lần mới lộ ra.
+# Base image Docker (pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime) cố định
+# torch 2.1.0. diffusers >= 0.35 khai báo BACKEND_EMPTY_CACHE["xpu"] =
+# torch.xpu.empty_cache ngay lúc import — torch 2.1.0 không có torch.xpu →
+# AttributeError khi container start. Ghim diffusers 0.30.x tương thích torch 2.1.
 torch>=2.0.0
 torchvision>=0.16.0
-diffusers==0.38.0
-transformers>=4.36.0
-accelerate>=0.26.0
-peft>=0.10.0
+diffusers==0.30.3
+transformers>=4.36.0,<4.46.0
+accelerate>=0.26.0,<0.35.0
+peft>=0.10.0,<0.14.0
 compel>=2.0.0
 
 # gRPC and APIs
